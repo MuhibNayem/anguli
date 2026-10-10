@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AegisBiometrics — Enterprise Zero-Misread Fingerprint Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      /* HSL Curated Soothing Professional Gradients */
+      --bg-gradient-start: hsl(215, 60%, 97%);
+      --bg-gradient-mid: hsl(230, 50%, 95%);
+      --bg-gradient-end: hsl(190, 45%, 96%);
+
+      --primary-hsl: 232, 70%, 60%;
+      --primary: hsl(var(--primary-hsl));
+      --primary-light: hsl(232, 85%, 92%);
+      --primary-glow: hsla(232, 85%, 65%, 0.25);
+
+      --teal-hsl: 174, 65%, 42%;
+      --teal: hsl(var(--teal-hsl));
+      --teal-light: hsl(174, 60%, 94%);
+
+      --amber-hsl: 38, 92%, 50%;
+      --amber: hsl(var(--amber-hsl));
+      --rose-hsl: 345, 80%, 58%;
+      --rose: hsl(var(--rose-hsl));
+
+      --text-main: hsl(222, 47%, 15%);
+      --text-muted: hsl(218, 20%, 45%);
+
+      /* Glassmorphism Specs */
+      --glass-bg: hsla(0, 0%, 100%, 0.65);
+      --glass-bg-hover: hsla(0, 0%, 100%, 0.85);
+      --glass-border: hsla(0, 0%, 100%, 0.7);
+      --glass-border-subtle: hsla(220, 30%, 85%, 0.4);
+      --glass-shadow: 0 16px 40px -12px hsla(220, 40%, 30%, 0.08), 0 2px 6px hsla(220, 40%, 30%, 0.04);
+      --glass-shadow-lg: 0 24px 60px -16px hsla(220, 50%, 25%, 0.12), 0 4px 12px hsla(220, 40%, 30%, 0.06);
+
+      --radius-sm: 10px;
+      --radius-md: 16px;
+      --radius-lg: 24px;
+      --radius-full: 9999px;
+
+      --transition-fast: 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+      --transition-normal: 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-mid) 50%, var(--bg-gradient-end) 100%);
+      color: var(--text-main);
+      min-height: 100vh;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Glass Panels */
+    .glass-card {
+      background: var(--glass-bg);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-md);
+      box-shadow: var(--glass-shadow);
+      transition: transform var(--transition-normal), box-shadow var(--transition-normal);
+    }
+
+    .glass-card:hover {
+      box-shadow: var(--glass-shadow-lg);
+    }
+
+    /* App Header */
+    header {
+      padding: 1.25rem 2.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: hsla(0, 0%, 100%, 0.75);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--glass-border-subtle);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+    }
+
+    .logo-badge {
+      width: 42px;
+      height: 42px;
+      border-radius: var(--radius-sm);
+      background: linear-gradient(135deg, var(--primary) 0%, var(--teal) 100%);
+      display: grid;
+      place-items: center;
+      color: white;
+      font-weight: 800;
+      font-size: 1.2rem;
+      box-shadow: 0 6px 16px var(--primary-glow);
+    }
+
+    .brand-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-subtitle {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .status-cluster {
+      display: flex;
+      align-items: center;
+      gap: 1.2rem;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.35rem 0.85rem;
+      border-radius: var(--radius-full);
+      background: hsla(0, 0%, 100%, 0.8);
+      border: 1px solid var(--glass-border-subtle);
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .dot-live {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--teal);
+      box-shadow: 0 0 10px var(--teal);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.85); }
+    }
+
+    /* Main Container */
+    main {
+      flex: 1;
+      max-width: 1360px;
+      margin: 2rem auto;
+      width: 92%;
+      display: flex;
+      flex-direction: column;
+      gap: 2rem;
+    }
+
+    /* Navigation Tabs */
+    .nav-tabs {
+      display: flex;
+      gap: 0.5rem;
+      background: hsla(0, 0%, 100%, 0.5);
+      padding: 0.35rem;
+      border-radius: var(--radius-full);
+      border: 1px solid var(--glass-border-subtle);
+      width: fit-content;
+    }
+
+    .tab-btn {
+      padding: 0.6rem 1.4rem;
+      border-radius: var(--radius-full);
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .tab-btn.active {
+      background: white;
+      color: var(--primary);
+      box-shadow: 0 4px 12px hsla(220, 40%, 30%, 0.08);
+    }
+
+    /* Views Layout */
+    .view-content {
+      display: none;
+      gap: 1.75rem;
+    }
+
+    .view-content.active {
+      display: grid;
+    }
+
+    /* Turnstile Simulator Grid */
+    .turnstile-grid {
+      grid-template-columns: 1.2fr 1fr;
+    }
+
+    .card-header {
+      padding: 1.5rem 1.75rem 1rem;
+      border-bottom: 1px solid var(--glass-border-subtle);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    .card-body {
+      padding: 1.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    /* Form Elements */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .form-label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .form-input, .form-select {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--glass-border-subtle);
+      background: hsla(0, 0%, 100%, 0.85);
+      font-family: inherit;
+      font-size: 0.92rem;
+      color: var(--text-main);
+      transition: border var(--transition-fast), box-shadow var(--transition-fast);
+      outline: none;
+    }
+
+    .form-input:focus, .form-select:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px var(--primary-glow);
+    }
+
+    /* Buttons */
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary) 0%, hsl(245, 75%, 60%) 100%);
+      color: white;
+      border: none;
+      padding: 0.9rem 1.6rem;
+      border-radius: var(--radius-sm);
+      font-weight: 600;
+      font-size: 0.95rem;
+      cursor: pointer;
+      box-shadow: 0 6px 18px var(--primary-glow);
+      transition: all var(--transition-fast);
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 24px var(--primary-glow);
+    }
+
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+
+    /* Turnstile Door Visualizer */
+    .door-visualizer {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2.5rem;
+      background: linear-gradient(145deg, hsla(0, 0%, 100%, 0.7), hsla(220, 40%, 96%, 0.5));
+      border-radius: var(--radius-md);
+      border: 1px solid var(--glass-border);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .turnstile-pod {
+      width: 180px;
+      height: 180px;
+      border-radius: 50%;
+      background: white;
+      border: 4px solid var(--glass-border-subtle);
+      box-shadow: 0 12px 32px hsla(220, 30%, 20%, 0.08);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .turnstile-pod.granted {
+      border-color: var(--teal);
+      box-shadow: 0 0 40px hsla(var(--teal-hsl), 0.35);
+      animation: unlockPulse 1.5s ease-out;
+    }
+
+    .turnstile-pod.denied {
+      border-color: var(--rose);
+      box-shadow: 0 0 40px hsla(var(--rose-hsl), 0.35);
+      animation: shake 0.4s ease-in-out;
+    }
+
+    @keyframes unlockPulse {
+      0% { transform: scale(0.95); }
+      50% { transform: scale(1.05); }
+      100% { transform: scale(1); }
+    }
+
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20%, 60% { transform: translateX(-6px); }
+      40%, 80% { transform: translateX(6px); }
+    }
+
+    .finger-sensor-icon {
+      font-size: 3.2rem;
+      transition: transform var(--transition-normal);
+    }
+
+    .door-status-text {
+      margin-top: 1.5rem;
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    .latency-pill {
+      margin-top: 0.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 0.3rem 0.8rem;
+      border-radius: var(--radius-full);
+      background: hsla(220, 30%, 94%, 0.8);
+      color: var(--text-muted);
+    }
+
+    /* Metric Badges */
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+    }
+
+    .metric-card {
+      padding: 1.1rem;
+      background: hsla(0, 0%, 100%, 0.6);
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--glass-border-subtle);
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .metric-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.45rem;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .metric-lbl {
+      font-size: 0.74rem;
+      color: var(--text-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    /* Logs Feed */
+    .log-box {
+      background: hsl(222, 47%, 12%);
+      color: hsl(210, 40%, 94%);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      padding: 1.25rem;
+      border-radius: var(--radius-sm);
+      height: 220px;
+      overflow-y: auto;
+      line-height: 1.6;
+    }
+
+    .log-entry {
+      margin-bottom: 0.35rem;
+    }
+
+    .log-entry.granted { color: hsl(150, 70%, 65%); }
+    .log-entry.denied { color: hsl(350, 85%, 70%); }
+    .log-entry.info { color: hsl(200, 80%, 75%); }
+
+    /* Quality Meter */
+    .meter-bar {
+      height: 10px;
+      border-radius: var(--radius-full);
+      background: hsl(220, 20%, 90%);
+      overflow: hidden;
+      margin-top: 0.4rem;
+    }
+
+    .meter-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--rose) 0%, var(--amber) 50%, var(--teal) 100%);
+      transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="logo-badge">🛡️</div>
+      <div>
+        <div class="brand-title">AegisBiometrics Enterprise ABIS</div>
+        <div class="brand-subtitle">NIST NFIQ 2.2 • Minutia Cylinder-Code (MCC) • OSDP v2.2</div>
+      </div>
+    </div>
+
+    <div class="status-cluster">
+      <div class="status-pill"><span class="dot-live"></span> Edge Fog Node: Online</div>
+      <div class="status-pill">SLA Target: &lt; 180ms</div>
+      <div class="status-pill" id="site-roster-badge">Local Roster: 0 Workers</div>
+    </div>
+  </header>
+
+  <main>
+    <div class="nav-tabs">
+      <button class="tab-btn active" onclick="switchTab('turnstile')">🚪 Turnstile Doorstep</button>
+      <button class="tab-btn" onclick="switchTab('enrollment')">👤 Biometric Enrollment</button>
+      <button class="tab-btn" onclick="switchTab('policy')">🔒 Anti-Passback & Policy</button>
+    </div>
+
+    <!-- Tab 1: Turnstile Doorstep Simulator -->
+    <div id="view-turnstile" class="view-content turnstile-grid active">
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">Industrial Turnstile Simulator (Lane 01)</div>
+          <span class="status-pill">OSDP v2.2 Encrypted</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">Employee ID (Simulating Badge Tap + 1:1 or Walk-up 1:N)</label>
+            <input type="text" id="scan-employee-id" class="form-input" value="EMP-90214" placeholder="e.g. EMP-90214 (Clear field for 1:N walk-up)">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Security Zone</label>
+            <select id="scan-zone-id" class="form-select">
+              <option value="zone-main-gate">Zone A: Main Turnstile Gate (60s Anti-Passback)</option>
+              <option value="zone-factory-floor">Zone B: Industrial Factory Floor (120s APB)</option>
+              <option value="zone-datacenter">Zone C: Mission-Critical Data Center (Min Score 70)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Direction</label>
+            <select id="scan-direction" class="form-select">
+              <option value="1">Entry (Inbound)</option>
+              <option value="2">Exit (Outbound)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Sensor Test Condition</label>
+            <select id="scan-noise" class="form-select">
+              <option value="0">Optimal Clean Sensor (Multispectral Subsurface)</option>
+              <option value="5">Minor Moisture / Grease (MCC Elastic Tolerance)</option>
+              <option value="99">Imposter Print (Non-Matching Intruder)</option>
+            </select>
+          </div>
+
+          <button class="btn-primary" onclick="simulateDoorScan()">
+            <span>👆 Touch / Wave Fingerprint</span>
+          </button>
+
+          <div class="metric-grid">
+            <div class="metric-card">
+              <div class="metric-val" id="metric-latency">-- ms</div>
+              <div class="metric-lbl">Total Latency</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-val" id="metric-score">--</div>
+              <div class="metric-lbl">MCC Match Score</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-val" id="metric-decision">IDLE</div>
+              <div class="metric-lbl">Access Decision</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Door Mechanical Status -->
+      <div class="glass-card">
+        <div class="card-header">
+          <div class="card-title">Physical Relay & Edge Telemetry</div>
+        </div>
+        <div class="card-body">
+          <div class="door-visualizer">
+            <div class="turnstile-pod" id="turnstile-pod">
+              <div class="finger-sensor-icon" id="sensor-icon">🔒</div>
+            </div>
+            <div class="door-status-text" id="door-status-text">TURNSTILE LOCKED</div>
+            <div class="latency-pill" id="door-reason-pill">Waiting for worker touch...</div>
+          </div>
+
+          <div class="form-label">Live Edge Event Stream</div>
+          <div class="log-box" id="door-logs">
+            <div class="log-entry info">[SYSTEM] Edge Fog Node initialized on port 50053.</div>
+            <div class="log-entry info">[SYSTEM] OSDP v2.2 Secure Channel established (AES-128 SCP).</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Biometric Enrollment -->
+    <div id="view-enrollment" class="view-content">
+      <div class="glass-card" style="max-width: 800px; margin: 0 auto; width: 100%;">
+        <div class="card-header">
+          <div class="card-title">Worker Biometric Registration Desk</div>
+          <span class="status-pill">NIST NFIQ 2.2 Quality Guard</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">Employee ID</label>
+            <input type="text" id="enroll-emp-id" class="form-input" value="EMP-90214" placeholder="e.g. EMP-90214">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Full Name</label>
+            <input type="text" id="enroll-name" class="form-input" value="Alex Rivera" placeholder="Worker Full Name">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Enrolled Finger</label>
+            <select id="enroll-pos" class="form-select">
+              <option value="2">Right Index (Primary Access)</option>
+              <option value="1">Right Thumb (Fallback)</option>
+              <option value="7">Left Index</option>
+            </select>
+          </div>
+
+          <button class="btn-primary" onclick="enrollWorker()">
+            <span>✨ Scan & Enroll Template (AES-256 Encrypted)</span>
+          </button>
+
+          <div id="enroll-result" style="display: none; flex-direction: column; gap: 0.8rem; margin-top: 1rem;">
+            <div class="form-label">NIST NFIQ 2.2 Quality Score</div>
+            <div style="display: flex; justify-content: space-between; font-weight: 700; font-family: 'JetBrains Mono';">
+              <span id="nfiq-text">Score: -- / 100</span>
+              <span id="nfiq-verdict" style="color: var(--teal);">ACCEPTABLE (&gt;= 65)</span>
+            </div>
+            <div class="meter-bar">
+              <div class="meter-fill" id="nfiq-meter"></div>
+            </div>
+            <div class="latency-pill" id="enroll-metrics-pill"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 3: Anti-Passback & Policy Engine -->
+    <div id="view-policy" class="view-content">
+      <div class="glass-card" style="max-width: 800px; margin: 0 auto; width: 100%;">
+        <div class="card-header">
+          <div class="card-title">Distributed Anti-Passback (APB) Management</div>
+        </div>
+        <div class="card-body">
+          <p style="color: var(--text-muted); font-size: 0.9rem; line-height: 1.5;">
+            Anti-passback prevents credential sharing: an employee who enters a security zone cannot re-enter the same zone within the configured time window without an intervening exit event.
+          </p>
+
+          <div class="form-group">
+            <label class="form-label">Employee ID to Reset</label>
+            <input type="text" id="reset-apb-id" class="form-input" value="EMP-90214">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Zone ID</label>
+            <input type="text" id="reset-zone-id" class="form-input" value="zone-main-gate">
+          </div>
+
+          <button class="btn-primary" style="background: linear-gradient(135deg, var(--teal) 0%, hsl(190, 70%, 40%) 100%);" onclick="resetAntiPassback()">
+            <span>🔄 Reset Anti-Passback Lock</span>
+          </button>
+
+          <div id="reset-apb-msg" style="font-weight: 600; color: var(--teal); font-size: 0.9rem;"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    function switchTab(tab) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.view-content').forEach(v => v.classList.remove('active'));
+
+      if (tab === 'turnstile') {
+        event.currentTarget.classList.add('active');
+        document.getElementById('view-turnstile').classList.add('active');
+      } else if (tab === 'enrollment') {
+        event.currentTarget.classList.add('active');
+        document.getElementById('view-enrollment').classList.add('active');
+      } else if (tab === 'policy') {
+        event.currentTarget.classList.add('active');
+        document.getElementById('view-policy').classList.add('active');
+      }
+    }
+
+    const API_KEY = 'aegis-secret-key-2026';
+
+    async function enrollWorker() {
+      const empId = document.getElementById('enroll-emp-id').value;
+      const name = document.getElementById('enroll-name').value;
+      const pos = parseInt(document.getElementById('enroll-pos').value);
+
+      try {
+        const res = await fetch('/api/v1/biometrics/enroll', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'X-API-Key': API_KEY
+          },
+          body: JSON.stringify({
+            employee_id: empId,
+            full_name: name,
+            position: pos
+          })
+        });
+
+        const data = await res.json();
+        const resBox = document.getElementById('enroll-result');
+        resBox.style.display = 'flex';
+
+        if (res.ok) {
+          document.getElementById('nfiq-text').innerText = `Score: ${data.nfiq_quality_score} / 100`;
+          document.getElementById('nfiq-meter').style.width = `${data.nfiq_quality_score}%`;
+          document.getElementById('enroll-metrics-pill').innerText = 
+            `Enrolled: ${data.minutiae_count} Minutiae • Processing: ${data.processing_time_us}µs • Template ID: ${data.template_id.substring(0, 8)}...`;
+          
+          appendLog(`[ENROLL] Successfully registered ${empId} (${name}) with NFIQ Score ${data.nfiq_quality_score}/100`, 'info');
+          updateRosterCount();
+        } else {
+          alert('Enrollment error: ' + (data.error || 'Unknown error'));
+        }
+      } catch (err) {
+        alert('Failed to connect to API Gateway: ' + err.message);
+      }
+    }
+
+    async function simulateDoorScan() {
+      const empId = document.getElementById('scan-employee-id').value;
+      const zoneId = document.getElementById('scan-zone-id').value;
+      const direction = parseInt(document.getElementById('scan-direction').value);
+      const noise = parseInt(document.getElementById('scan-noise').value);
+
+      const pod = document.getElementById('turnstile-pod');
+      const icon = document.getElementById('sensor-icon');
+      const statusText = document.getElementById('door-status-text');
+      const reasonPill = document.getElementById('door-reason-pill');
+
+      pod.className = 'turnstile-pod';
+      icon.innerText = '⏳';
+      statusText.innerText = 'READING BIOMETRIC...';
+
+      try {
+        const res = await fetch('/api/v1/doors/scan', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'X-API-Key': API_KEY
+          },
+          body: JSON.stringify({
+            turnstile_id: 'turnstile-lane-01',
+            zone_id: zoneId,
+            direction: direction,
+            employee_id: empId,
+            noise_factor: noise
+          })
+        });
+
+        const data = await res.json();
+
+        document.getElementById('metric-latency').innerText = `${data.total_latency_ms || 12} ms`;
+        document.getElementById('metric-score').innerText = (data.match_score || 0).toFixed(1);
+        document.getElementById('metric-decision').innerText = data.is_access_granted ? 'GRANTED' : 'DENIED';
+
+        if (data.is_access_granted) {
+          pod.className = 'turnstile-pod granted';
+          icon.innerText = '🔓';
+          statusText.innerText = 'ACCESS GRANTED';
+          statusText.style.color = 'var(--teal)';
+          reasonPill.innerText = `Relay Open: ${data.relay_strike_duration_ms}ms • ${data.reason}`;
+          appendLog(`[TURNSTILE-01] GRANTED: ${data.matched_employee_id} (Score: ${(data.match_score).toFixed(1)}, Latency: ${data.total_latency_ms}ms)`, 'granted');
+        } else {
+          pod.className = 'turnstile-pod denied';
+          icon.innerText = '🚫';
+          statusText.innerText = 'ACCESS DENIED';
+          statusText.style.color = 'var(--rose)';
+          reasonPill.innerText = `${data.reason}`;
+          appendLog(`[TURNSTILE-01] DENIED: ${data.reason}`, 'denied');
+        }
+      } catch (err) {
+        pod.className = 'turnstile-pod denied';
+        icon.innerText = '⚠️';
+        statusText.innerText = 'COMMUNICATION ERROR';
+        reasonPill.innerText = err.message;
+        appendLog(`[ERROR] Gateway call failed: ${err.message}`, 'denied');
+      }
+    }
+
+    async function resetAntiPassback() {
+      const empId = document.getElementById('reset-apb-id').value;
+      const zoneId = document.getElementById('reset-zone-id').value;
+
+      try {
+        const res = await fetch('/api/v1/policies/reset-apb', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'X-API-Key': API_KEY
+          },
+          body: JSON.stringify({ employee_id: empId, zone_id: zoneId })
+        });
+        const data = await res.json();
+        document.getElementById('reset-apb-msg').innerText = data.message || 'Anti-passback state cleared.';
+        appendLog(`[POLICY] Anti-passback manually cleared for ${empId} in ${zoneId}`, 'info');
+      } catch (err) {
+        alert('Reset APB failed: ' + err.message);
+      }
+    }
+
+    async function updateRosterCount() {
+      try {
+        const res = await fetch('/api/v1/doors/status?turnstile_id=turnstile-lane-01');
+        const data = await res.json();
+        if (data && data.local_roster_count !== undefined) {
+          document.getElementById('site-roster-badge').innerText = `Local Roster: ${data.local_roster_count} Workers`;
+        }
+      } catch (e) {}
+    }
+
+    function appendLog(msg, type) {
+      const box = document.getElementById('door-logs');
+      const time = new Date().toLocaleTimeString();
+      const div = document.createElement('div');
+      div.className = `log-entry ${type}`;
+      div.innerText = `[${time}] ${msg}`;
+      box.prepend(div);
+    }
+
+    // Auto-enroll a sample worker on load to enable instant 1-click testing
+    window.addEventListener('DOMContentLoaded', async () => {
+      updateRosterCount();
+      // Auto-enroll default worker
+      await fetch('/api/v1/biometrics/enroll', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-API-Key': API_KEY
+        },
+        body: JSON.stringify({
+          employee_id: 'EMP-90214',
+          full_name: 'Alex Rivera',
+          position: 2
+        })
+      });
+      document.getElementById('scan-employee-id').value = 'EMP-90214';
+      updateRosterCount();
+    });
+  </script>
+</body>
+</html>

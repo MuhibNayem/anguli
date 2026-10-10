@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+package biometrics.v1;
+
+option go_package = "finger-scanner/pkg/api/v1/biometrics;biometricsv1";
+
+// BiometricsService provides enterprise-grade fingerprint enrollment, verification, and identification.
+service BiometricsService {
+  // EnrollFingerprint enhances an input image, enforces NFIQ quality thresholds, extracts minutiae & MCC cylinders, and stores encrypted templates.
+  rpc EnrollFingerprint(EnrollFingerprintRequest) returns (EnrollFingerprintResponse);
+
+  // VerifyFingerprint performs a high-precision 1:1 match against an enrolled employee template.
+  rpc VerifyFingerprint(VerifyFingerprintRequest) returns (VerifyFingerprintResponse);
+
+  // IdentifyFingerprint performs a 1:N candidate search across stored templates.
+  rpc IdentifyFingerprint(IdentifyFingerprintRequest) returns (IdentifyFingerprintResponse);
+
+  // GetTemplate retrieves an enrolled template record for local edge caching.
+  rpc GetTemplate(GetTemplateRequest) returns (GetTemplateResponse);
+}
+
+enum FingerPosition {
+  FINGER_POSITION_UNSPECIFIED = 0;
+  FINGER_POSITION_RIGHT_THUMB = 1;
+  FINGER_POSITION_RIGHT_INDEX = 2;
+  FINGER_POSITION_RIGHT_MIDDLE = 3;
+  FINGER_POSITION_RIGHT_RING = 4;
+  FINGER_POSITION_RIGHT_LITTLE = 5;
+  FINGER_POSITION_LEFT_THUMB = 6;
+  FINGER_POSITION_LEFT_INDEX = 7;
+  FINGER_POSITION_LEFT_MIDDLE = 8;
+  FINGER_POSITION_LEFT_RING = 9;
+  FINGER_POSITION_LEFT_LITTLE = 10;
+}
+
+enum MinutiaType {
+  MINUTIA_TYPE_UNSPECIFIED = 0;
+  MINUTIA_TYPE_ENDING = 1;
+  MINUTIA_TYPE_BIFURCATION = 2;
+}
+
+message Minutia {
+  uint32 x = 1;
+  uint32 y = 2;
+  double angle = 3; // Angle in radians [0, 2π)
+  MinutiaType type = 4;
+  uint32 quality = 5; // Quality score [0, 100]
+}
+
+message EnrollFingerprintRequest {
+  string employee_id = 1;
+  string full_name = 2;
+  FingerPosition position = 3;
+  bytes image_raw_gray = 4; // 8-bit grayscale raw image bytes (row-major)
+  uint32 width = 5;
+  uint32 height = 6;
+  uint32 dpi = 7;
+}
+
+message EnrollFingerprintResponse {
+  string template_id = 1;
+  string employee_id = 2;
+  uint32 nfiq_quality_score = 3;
+  bool is_quality_acceptable = 4;
+  uint32 minutiae_count = 5;
+  string message = 6;
+  int64 processing_time_us = 7;
+}
+
+message VerifyFingerprintRequest {
+  string employee_id = 1;
+  FingerPosition position = 2;
+  bytes probe_image_raw_gray = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+}
+
+message VerifyFingerprintResponse {
+  bool is_match = 1;
+  double score = 2; // Normalized score [0.0 - 100.0]
+  uint32 matched_cylinders = 3;
+  uint32 nfiq_quality_score = 4;
+  int64 matching_time_us = 5;
+  string reason = 6;
+}
+
+message IdentifyFingerprintRequest {
+  string facility_id = 1;
+  bytes probe_image_raw_gray = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  uint32 top_k = 5;
+}
+
+message CandidateMatch {
+  string employee_id = 1;
+  double score = 2;
+  FingerPosition position = 3;
+}
+
+message IdentifyFingerprintResponse {
+  bool is_identified = 1;
+  string matched_employee_id = 2;
+  double top_score = 3;
+  repeated CandidateMatch candidates = 4;
+  int64 identification_time_us = 5;
+}
+
+message GetTemplateRequest {
+  string employee_id = 1;
+  FingerPosition position = 2;
+}
+
+message TemplateRecord {
+  string template_id = 1;
+  string employee_id = 2;
+  FingerPosition position = 3;
+  uint32 nfiq_score = 4;
+  repeated Minutia minutiae = 5;
+  bytes encrypted_payload = 6;
+  int64 enrolled_at_unix = 7;
+}
+
+message GetTemplateResponse {
+  bool found = 1;
+  TemplateRecord template = 2;
+}

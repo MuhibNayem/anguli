@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package accesscontrol.v1;
+
+option go_package = "finger-scanner/pkg/api/v1/accesscontrol;accesscontrolv1";
+
+// AccessPolicyService manages access control decisions, security zones, and distributed anti-passback.
+service AccessPolicyService {
+  // EvaluateAccess checks credentials, zone clearance, active shifts, and anti-passback state.
+  rpc EvaluateAccess(EvaluateAccessRequest) returns (EvaluateAccessResponse);
+
+  // ConfigurePolicy updates access rules for specific roles or zones.
+  rpc ConfigurePolicy(ConfigurePolicyRequest) returns (ConfigurePolicyResponse);
+
+  // GetPolicy retrieves the policy definition for a zone.
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+
+  // ResetAntiPassback resets anti-passback status for an employee.
+  rpc ResetAntiPassback(ResetAntiPassbackRequest) returns (ResetAntiPassbackResponse);
+}
+
+enum AccessDecision {
+  ACCESS_DECISION_UNSPECIFIED = 0;
+  ACCESS_DECISION_GRANTED = 1;
+  ACCESS_DECISION_DENIED_INVALID_ZONE = 2;
+  ACCESS_DECISION_DENIED_ANTI_PASSBACK = 3;
+  ACCESS_DECISION_DENIED_SCHEDULE = 4;
+  ACCESS_DECISION_DENIED_BIOMETRIC_MISMATCH = 5;
+}
+
+enum DoorDirection {
+  DOOR_DIRECTION_UNSPECIFIED = 0;
+  DOOR_DIRECTION_ENTRY = 1;
+  DOOR_DIRECTION_EXIT = 2;
+}
+
+message EvaluateAccessRequest {
+  string employee_id = 1;
+  string zone_id = 2;
+  string door_id = 3;
+  DoorDirection direction = 4;
+  bool biometric_verified = 5;
+  double biometric_score = 6;
+  int64 timestamp_unix = 7;
+}
+
+message EvaluateAccessResponse {
+  AccessDecision decision = 1;
+  bool is_granted = 2;
+  string reason = 3;
+  int64 relay_open_duration_ms = 4; // Solenoid unlock pulse duration (e.g. 2500ms)
+}
+
+message PolicyRule {
+  string zone_id = 1;
+  string allowed_role = 2;
+  bool require_biometrics = 3;
+  double min_biometric_score = 4; // e.g. 65.0
+  bool enforce_anti_passback = 5;
+  uint32 anti_passback_window_sec = 6; // e.g. 60 seconds
+}
+
+message ConfigurePolicyRequest {
+  PolicyRule rule = 1;
+}
+
+message ConfigurePolicyResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetPolicyRequest {
+  string zone_id = 1;
+}
+
+message GetPolicyResponse {
+  bool found = 1;
+  PolicyRule rule = 2;
+}
+
+message ResetAntiPassbackRequest {
+  string employee_id = 1;
+  string zone_id = 2;
+}
+
+message ResetAntiPassbackResponse {
+  bool success = 1;
+  string message = 2;
+}

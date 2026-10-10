@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package edgegateway.v1;
+
+option go_package = "finger-scanner/pkg/api/v1/edgegateway;edgegatewayv1";
+
+import "api/proto/v1/biometrics.proto";
+import "api/proto/v1/accesscontrol.proto";
+
+// EdgeGatewayService coordinates turnstile hardware, local fog caching, and offline journal replay.
+service EdgeGatewayService {
+  // ProcessTurnstileScan handles an OSDP v2 reader event, executes edge matching, evaluates policy, and fires the relay.
+  rpc ProcessTurnstileScan(ProcessTurnstileScanRequest) returns (ProcessTurnstileScanResponse);
+
+  // SyncFacilityRoster synchronizes updated employee templates into the local in-memory edge cache.
+  rpc SyncFacilityRoster(SyncFacilityRosterRequest) returns (SyncFacilityRosterResponse);
+
+  // GetTurnstileStatus returns real-time hardware status, reader health, and offline pending event count.
+  rpc GetTurnstileStatus(GetTurnstileStatusRequest) returns (GetTurnstileStatusResponse);
+
+  // ReplayOfflineEvents flushes locally buffered offline audit logs upstream to central storage.
+  rpc ReplayOfflineEvents(ReplayOfflineEventsRequest) returns (ReplayOfflineEventsResponse);
+}
+
+message ProcessTurnstileScanRequest {
+  string turnstile_id = 1;
+  string zone_id = 2;
+  accesscontrol.v1.DoorDirection direction = 3;
+  string credential_card_id = 4; // Optional badge/card ID (for 1:1)
+  string employee_id = 5;        // Optional employee ID if badge presented
+  bytes probe_image_raw_gray = 6;
+  uint32 image_width = 7;
+  uint32 image_height = 8;
+  int64 scan_timestamp_unix = 9;
+}
+
+message ProcessTurnstileScanResponse {
+  bool is_access_granted = 1;
+  accesscontrol.v1.AccessDecision decision = 2;
+  string matched_employee_id = 3;
+  double match_score = 4;
+  string reason = 5;
+  int64 relay_strike_duration_ms = 6;
+  int64 total_latency_ms = 7;
+  bool processed_offline = 8;
+}
+
+message SyncEmployeeItem {
+  string employee_id = 1;
+  string full_name = 2;
+  string role = 3;
+  biometrics.v1.FingerPosition position = 4;
+  repeated biometrics.v1.Minutia minutiae = 5;
+  bytes mcc_cylinder_bytes = 6;
+  bool is_active = 7;
+}
+
+message SyncFacilityRosterRequest {
+  string facility_id = 1;
+  repeated SyncEmployeeItem items = 2;
+  int64 version = 3;
+  repeated accesscontrol.v1.PolicyRule policies = 4;
+}
+
+message SyncFacilityRosterResponse {
+  bool success = 1;
+  uint32 synced_count = 2;
+  string message = 3;
+}
+
+message GetTurnstileStatusRequest {
+  string turnstile_id = 1;
+}
+
+message TurnstileStatus {
+  string turnstile_id = 1;
+  string zone_id = 2;
+  bool is_online = 3;
+  bool reader_connected = 4;
+  uint32 local_roster_count = 5;
+  uint32 offline_pending_events = 6;
+  int64 uptime_seconds = 7;
+}
+
+message GetTurnstileStatusResponse {
+  TurnstileStatus status = 1;
+}
+
+message OfflineAuditEvent {
+  string event_id = 1;
+  string turnstile_id = 2;
+  string employee_id = 3;
+  bool access_granted = 4;
+  string decision = 5;
+  int64 timestamp_unix = 6;
+}
+
+message ReplayOfflineEventsRequest {
+  string facility_id = 1;
+  repeated OfflineAuditEvent events = 2;
+}
+
+message ReplayOfflineEventsResponse {
+  uint32 replayed_count = 3;
+  bool success = 4;
+}

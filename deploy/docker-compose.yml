@@ -1,0 +1,58 @@
+services:
+  biometric-service:
+    build:
+      context: ../
+      dockerfile: deploy/docker/biometric-service.Dockerfile
+    container_name: aegis-biometric-service
+    ports:
+      - "50051:50051"
+    environment:
+      - PORT=50051
+      - MASTER_KEY=${MASTER_KEY:?Error: MASTER_KEY environment variable is required and must be a 64-char hex string}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+    restart: unless-stopped
+
+  access-policy-service:
+    build:
+      context: ../
+      dockerfile: deploy/docker/access-policy-service.Dockerfile
+    container_name: aegis-access-policy-service
+    ports:
+      - "50052:50052"
+    environment:
+      - PORT=50052
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+    restart: unless-stopped
+
+  edge-gateway-service:
+    build:
+      context: ../
+      dockerfile: deploy/docker/edge-gateway-service.Dockerfile
+    container_name: aegis-edge-gateway-service
+    ports:
+      - "50053:50053"
+    environment:
+      - PORT=50053
+      - POLICY_ADDR=access-policy-service:50052
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: ../
+      dockerfile: deploy/docker/api-gateway.Dockerfile
+    container_name: aegis-api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - BIOMETRIC_ADDR=biometric-service:50051
+      - POLICY_ADDR=access-policy-service:50052
+      - EDGE_ADDR=edge-gateway-service:50053
+      - API_GATEWAY_KEY=${API_GATEWAY_KEY:?Error: API_GATEWAY_KEY environment variable is required}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+    depends_on:
+      - biometric-service
+      - access-policy-service
+      - edge-gateway-service
+    restart: unless-stopped

@@ -1,0 +1,53 @@
+# Secrets and credentials — never commit these.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+credentials.json
+
+# Go build artifacts
+/bin/
+/build/
+/dist/
+anguli
+api-gateway
+biometric-service
+access-policy-service
+edge-gateway-service
+*.exe
+*.test
+*.out
+
+# Coverage and profiling
+coverage.out
+coverage.html
+*.prof
+*.cpuprofile
+*.memprofile
+
+# Chaos / fuzz corpus caches
+testdata/fuzz/
+*.cache
+
+# Node / frontend
+node_modules/
+web/node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local runtime state
+/tmp/
+*.pid
+*.log

@@ -215,6 +215,9 @@ jobs:
         env:
           MASTER_KEY: 0000000000000000000000000000000000000000000000000000000000000000
           API_GATEWAY_KEY: ci-placeholder-not-a-real-key
+          # Distinct from the admin key on purpose: compose requires it, and the
+          # gateway refuses to start if the two credentials are equal.
+          READER_KEY: ci-placeholder-not-a-real-key-either
         run: |
           docker compose -f deploy/docker-compose.yml config -q
           echo "compose config is valid"

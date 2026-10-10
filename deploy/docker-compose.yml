@@ -105,6 +105,11 @@ services:
       - POLICY_ADDR=access-policy-service:50052
       - EDGE_ADDR=edge-gateway-service:50053
       - API_GATEWAY_KEY=${API_GATEWAY_KEY:?API_GATEWAY_KEY must be set}
+      # The reader credential is what a turnstile presents. It is deliberately
+      # NOT the same value as the admin key: sharing one would give every
+      # turnstile the ability to enroll employees, revoke employees and reset
+      # anti-passback. The gateway refuses to start if the two are equal.
+      - READER_KEY=${READER_KEY:?READER_KEY must be set}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       # Overload protection: bound concurrency so excess load is shed with a
       # 503 instead of queueing without limit.

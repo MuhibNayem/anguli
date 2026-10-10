@@ -10,7 +10,7 @@ or an unset API key. Failing at `helm template` time is far cheaper than
 discovering it on a door that will not open.
 */}}
 {{- if not .Values.existingSecret.name }}
-{{- fail "existingSecret.name is required. Create a Secret containing MASTER_KEY and API_GATEWAY_KEY and point this value at it. The chart will not synthesise credentials." }}
+{{- fail "existingSecret.name is required. Create a Secret containing MASTER_KEY, API_GATEWAY_KEY and READER_KEY and point this value at it. The chart will not synthesise credentials. READER_KEY is the credential every turnstile presents and must differ from API_GATEWAY_KEY: sharing one value gives every reader administrative access." }}
 {{- end }}
 
 {{- if lt (int .Values.overload.maxConcurrentRequests) 1 }}

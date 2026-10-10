@@ -60,7 +60,10 @@ starting a service with an empty one.
 | `MASTER_KEY` | — (required) | 64-char hex key for the template vault (primary) |
 | `MASTER_KEY_ID` | `1` | Key id assigned to `MASTER_KEY` |
 | `MASTER_KEY_PREVIOUS` | — | `kid:hex,kid:hex,…` kept for decryption only during a rotation |
-| `API_GATEWAY_KEY` | — (required) | REST API credential |
+| `API_GATEWAY_KEY` | — (required) | Administrator credential for REST |
+| `READER_KEY` | — (required) | Credential a turnstile presents; must differ from `API_GATEWAY_KEY` |
+| `RATE_LIMIT_RPS` | `10` | Sustained biometric requests per second per caller |
+| `RATE_LIMIT_BURST` | `20` | Instantaneous burst per caller |
 | `STORAGE_DRIVER` | `sqlite` | `sqlite` or `postgres` |
 | `STORAGE_DSN` | — | Postgres URL; ignored for SQLite |
 | `STORAGE_DATA_DIR` | `data` | Where the SQLite file lives |
@@ -72,6 +75,37 @@ starting a service with an empty one.
 | `TLS_SERVER_NAME` | — | SNI name the client validates the server against |
 | `TLS_REQUIRE_MTLS` | `false` | Set `true` to demand and verify a client certificate |
 | `PORT` | per-service | `50051` / `50052` / `50053` / `8080` |
+
+### Credentials and privilege separation
+
+Two credentials, and they are not interchangeable:
+
+| Credential | Presented by | May do |
+|---|---|---|
+| `API_GATEWAY_KEY` | HR system, admin tooling | Everything: enroll, revoke, reset anti-passback, and door scans |
+| `READER_KEY` | Every turnstile in the building | Door scans only: `verify` and `doors/scan` |
+
+The reader key lives on hardware in a corridor, so anything that **grants**
+access (`enroll`), **revokes** access (`revoke`), or **resets** access state
+(`reset-apb`) requires the administrator key. Resetting anti-passback in
+particular is a direct bypass of the tail-entry control — a reader that could
+call it would let anyone defeat it for anyone.
+
+A reader credential against an administrative route returns **403**, not 401:
+the caller authenticated successfully and still is not allowed, so a 401 would
+invite a pointless retry loop.
+
+**The gateway refuses to start** if either credential is missing outside
+development, or if the two are equal. There are no built-in production
+credentials. The published `aegis-*-2026` values are used only when
+`ENVIRONMENT` is `development` or `dev`, and doing so logs a warning that says
+in plain terms that the values are in the source repository and grant
+administrative access.
+
+> **Rotating these is not automatic.** Both values are read once at startup.
+> Changing `API_GATEWAY_KEY` or `READER_KEY` requires a restart, and there is
+> no dual-key acceptance window, so roll it with a coordinated restart or
+> brief 503s will reach whichever turnstiles are still using the old value.
 
 ### Interoperability: ISO/IEC standards
 

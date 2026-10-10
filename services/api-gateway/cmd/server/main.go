@@ -85,7 +85,14 @@ func main() {
 	}
 	defer serviceClients.Close()
 
-	authConfig := middleware.NewAuthConfig(logger)
+	// Fail closed on missing credentials before doing anything else. A gateway
+	// that starts with a published default key is worse than one that does not
+	// start, because the default also grants administrative access.
+	authConfig, err := middleware.NewAuthConfig(logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "refusing to start", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 
 	// Overload protection: bounded concurrency with load shedding. Without a
 	// ceiling, offered load above capacity does not produce errors - it
@@ -204,14 +211,22 @@ func main() {
 	// C4 & C5: Protected REST Endpoints requiring API Key or Bearer Token.
 	// Every request passes admission control first so the ceiling applies
 	// before any work is accepted.
+	// Privilege separation.
+	//
+	// The reader key sits on every turnstile in the building, so anything that
+	// grants access, revokes access or resets access state must require the
+	// administrator key instead. Resetting anti-passback in particular is a
+	// direct bypass of the tail-entry control, and a reader that could call it
+	// would be able to defeat it for anyone.
+	//
 	// rateLimit sits inside auth so an unauthenticated flood is rejected before
 	// it can consume a legitimate reader's budget, and inside overload so a
 	// throttled request never takes a concurrency slot it is not going to use.
-	mux.HandleFunc("/api/v1/biometrics/enroll", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleEnroll)))))
+	mux.HandleFunc("/api/v1/biometrics/enroll", overload(cors(authConfig.RequireAdmin(rateLimit(handler.HandleEnroll)))))
 	mux.HandleFunc("/api/v1/biometrics/verify", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleVerify)))))
 	mux.HandleFunc("/api/v1/doors/scan", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleDoorScan)))))
-	mux.HandleFunc("/api/v1/biometrics/revoke", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleRevokeTemplate)))))
-	mux.HandleFunc("/api/v1/policies/reset-apb", overload(cors(authConfig.RequireAuth(handler.HandleResetAPB))))
+	mux.HandleFunc("/api/v1/biometrics/revoke", overload(cors(authConfig.RequireAdmin(rateLimit(handler.HandleRevokeTemplate)))))
+	mux.HandleFunc("/api/v1/policies/reset-apb", overload(cors(authConfig.RequireAdmin(handler.HandleResetAPB))))
 
 	// Public Health and Status endpoints
 	mux.HandleFunc("/api/v1/doors/status", overload(cors(handler.HandleDoorStatus)))

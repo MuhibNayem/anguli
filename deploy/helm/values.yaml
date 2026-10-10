@@ -6,6 +6,7 @@
 #   kubectl create secret generic anguli-secrets \
 #     --from-literal=MASTER_KEY="$(openssl rand -hex 32)" \
 #     --from-literal=API_GATEWAY_KEY="$(openssl rand -hex 32)" \
+#     --from-literal=READER_KEY="$(openssl rand -hex 32)" \
 #     --from-literal=STORAGE_DSN="postgres://anguli:...@host:5432/anguli?sslmode=require"
 #
 # STORAGE_DSN is required whenever a component sets storageDriver: postgres.

@@ -281,6 +281,17 @@ func (s *edgeService) ProcessScan(
 				isMatch = false
 				reason = fmt.Sprintf("Access denied (offline cached policy): role '%s' does not satisfy zone requirement '%s'", empRole, rule.AllowedRole)
 				relayDuration = 0
+			} else if rule.RequireBiometrics && rule.MinBiometricScore < 0 {
+				// A negative threshold is not a stricter test, it is no test:
+				// `score < threshold` is never true, so every verified print
+				// would pass. Central rejects such a rule at configuration time,
+				// but this node caches what it is given and may hold one stored
+				// before that check existed - and when the WAN is down this is
+				// the only evaluation that runs.
+				decision = 2 // ACCESS_DECISION_DENIED_INVALID_ZONE
+				isMatch = false
+				reason = fmt.Sprintf("Access denied (offline cached policy): zone has an unusable biometric threshold %.2f; re-sync policies", rule.MinBiometricScore)
+				relayDuration = 0
 			} else if rule.RequireBiometrics && bestScore < rule.MinBiometricScore {
 				// 3. Local Biometric Threshold Check
 				decision = 5 // ACCESS_DECISION_DENIED_BIOMETRIC_MISMATCH

@@ -157,6 +157,16 @@ ranks at or above it:
 
 An empty `allowed_role` means the zone has no clearance requirement.
 
+`min_biometric_score` is a percentage and must be between 0 and 100; a value
+outside that range is rejected at configuration time and locks the zone at
+evaluation time, rather than being stored as a control that quietly admits every
+print.
+
+`anti_passback_window_sec: 0` means **no time limit** - once a zone has recorded
+an entry, a second entry is refused for as long as the rule stands. It is not
+the way to switch anti-passback off; `enforce_anti_passback` is. This is
+surprising enough to state, and it fails closed rather than open.
+
 Every turnstile scan must also name a direction: `DOOR_DIRECTION_ENTRY` (1) or
 `DOOR_DIRECTION_EXIT` (2). An unset or unrecognised direction is rejected —
 proto3 defaults an unset enum to zero, and the anti-passback evaluation reads

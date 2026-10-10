@@ -218,6 +218,26 @@ func (s *policyService) Evaluate(
 
 	// 3. Biometric verification check
 	if rule.RequireBiometrics {
+		// A threshold below zero means the rule cannot be evaluated, not that it
+		// is permissive: `score < threshold` would never be true, so every
+		// verified print would pass. Configure rejects such a value, but a rule
+		// stored before that check existed - or written by a tool bypassing it -
+		// must fail closed here too.
+		if rule.MinBiometricScore < 0 {
+			s.logger.WarnContext(ctx, "access denied: zone policy has an unusable biometric threshold",
+				slog.String("employee_id", empID),
+				slog.String("zone_id", zoneID),
+				slog.Float64("threshold", rule.MinBiometricScore),
+			)
+			return &EvaluationResult{
+				Decision:  2, // ACCESS_DECISION_DENIED_INVALID_ZONE
+				IsGranted: false,
+				Reason: fmt.Sprintf("Zone '%s' has a biometric threshold of %.2f, which is outside "+
+					"the valid range 0-100; the zone is locked until it is reconfigured",
+					zoneID, rule.MinBiometricScore),
+				RelayOpenDurationMs: 0,
+			}, nil
+		}
 		if !bioVerified || bioScore < rule.MinBiometricScore {
 			s.logger.WarnContext(ctx, "access denied: biometric score below threshold",
 				slog.String("employee_id", empID),
@@ -409,6 +429,18 @@ func (s *policyService) Configure(ctx context.Context, rule *domain.PolicyRule) 
 				"(SECURITY_ADMIN, OPERATOR, EMPLOYEE and their aliases); an unrecognised "+
 				"requirement would deny everyone, so it is rejected rather than stored",
 			rule.ZoneID, rule.AllowedRole)
+	}
+	// The match score is a percentage, so the threshold is too. A negative value
+	// makes `score < threshold` never true, so every verified print passes no
+	// matter how poor the match - a configured control silently switched off by
+	// a value that looks like a number. A value above 100 would fail every scan,
+	// which is the safe direction but still a mistake worth reporting rather
+	// than locking a zone at 3am.
+	if rule.MinBiometricScore < 0 || rule.MinBiometricScore > 100 {
+		return fmt.Errorf(
+			"policy for zone %q has a biometric threshold of %.2f, outside the valid "+
+				"range 0-100; below 0 would admit every print regardless of match score",
+			rule.ZoneID, rule.MinBiometricScore)
 	}
 	return s.repo.SaveRule(ctx, rule)
 }

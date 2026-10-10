@@ -52,6 +52,7 @@ should not be cited as such.
 | Match reproducibility | **Was not production-ready until this cycle** | The matcher was **nondeterministic**: spatial-consensus ties were broken by Go map iteration order, so the same probe against the same finger scored differently on repeated calls in about half of all trials. A deny near the threshold could not be reproduced or audited. Tie-breaks are now total and ordered; `TestVerifyIsDeterministic` and `TestVerifyIsDeterministicUnderConcurrency` guard it. |
 | Circuit breaker and overload shedding | **Breaker had a race until this cycle** | The breaker published its open state before its cool-down timestamp, so a concurrent `Allow()` could read the timestamp as unset, compute the cool-down as `now − zero time` (decades), conclude it had elapsed, and admit a probe the cool-down existed to reject — parking the breaker in half-open with its probe slot spent. During an outage that sheds load and then lets one request per trip straight through. An unset timestamp now reads as *not* elapsed. `TestBreaker_NeverHalfOpensWithoutAnElapsedCoolDown` guards it; the same race was making `TestBreaker_ReopenRacesAllowReads` fail ~2% of runs, which made CI intermittently red. |
 | Biometric endpoint rate limiting | **Was absent entirely** | `/api/v1/doors/scan` performs 1:N identification and answers "who does this print belong to" across the whole gallery. Behind one shared API key and with no rate limit, any holder could enumerate a site's enrolled population — the one thing an access system must not disclose, and permanent if leaked, since templates cannot be reissued. Now bounded per caller, hashed so process memory holds no raw credential, and observable via `anguli_ratelimit_rejected_total`. |
+| Facility isolation | **Single-facility per deployment, and now enforced** | Every table is keyed without a facility, so two sites sharing one database would silently merge their zone policies, employee roles and templates — `facility_id` existed in the API and was discarded as a hardcoded literal. Rather than half-scope the schema, `FACILITY_ID` is real configuration, the database records which facility claimed it, and both stateful services **refuse to start** against a database claimed by another. Verified by running the built binary. Multi-site still means one deployment per site — see below. |
 | Template key rotation | Production-ready | Zero-downtime rotation with no re-enrollment: a keyring loaded from the environment, and a `keyrotate` command that decrypts, re-encrypts and verifies every migrated template. Proven to leave the old key unable to read migrated records. |
 | Central access audit trail | **Did not exist, though every layer of it was "done"** | Replaying the edge's offline WAL **destroyed** it: `DrainOfflineEvents` truncated the durable log as part of the read, handed the events to a handler that discarded them, and the `access_events` table it was meant to feed was never written by any code path. Nothing triggered a replay at all, so during an outage every door decision was written to one edge machine's disk and never left. "Who entered which door, and when" had no central answer. Now: take → forward → acknowledge, with the WAL retired only after a confirmed forward — and retired by rewriting it from the live queue rather than truncating, because a door scan that lands mid-forward is still only on disk, and a truncate would destroy it while the node still held a copy in memory that looked fine until it restarted; a new `RecordAccessEvents` RPC; a real `access_audit_events` table keyed on a generated `event_id` so a retried batch cannot duplicate a door entry; and a background loop that flushes on a timer. The trail is also **readable**: `GET /api/v1/audit/access-events` (admin-only, rate limited), filtered by employee, zone, turnstile, time window and outcome, paginated by a keyset cursor so a replay landing mid-scan cannot make an operator skip events. Recording without a read path would have left the same gap in a new form — data no application can query answers none of the questions an audit trail exists to answer. |
 
@@ -215,6 +216,41 @@ Two smaller consequences worth stating:
 - `recorded_at_unix` is stamped when central storage receives the event, not when
   the door opened. Both timestamps are stored, and `occurred_unix` is the one to
   filter on, but an outage makes the gap between them large and visible.
+
+### A deployment serves exactly one facility, and multi-site is not supported
+
+`facility_id` appears in three protobuf messages and was, until recently,
+hardcoded to the literal `"facility-primary"` in the gateway and stored nowhere.
+Worse, the schema behind it has no facility anywhere: policies are keyed by
+`zone_id`, employee roles by `employee_id`, templates by
+`(employee_id, position)`, anti-passback by `(employee_id, zone_id)`.
+
+For one site that is correct. For two it fails **silently**: a company with
+buildings in London and Dublin that names both lobbies `zone-main-gate` has one
+policy row between them, so tightening the London lobby threshold quietly
+changes the Dublin lobby, and 1:N search at one building matches against the
+other's enrolled fingers. Nothing errors. Nothing logs. It is simply wrong.
+
+The fix chosen was **not** to add a `facility_id` column to some tables. Half a
+migration is worse than none — a schema where policies are scoped but templates
+and anti-passback are not reads as isolated while still merging sites, and
+reviewing it is far harder than reviewing a schema with an honest boundary. So:
+
+- `FACILITY_ID` is real configuration (default `default`), used by the gateway
+  and stamped on edge roster syncs, replacing the hardcoded literal.
+- The database records the facility that claimed it, on first boot, and both
+  stateful services **refuse to start** if it is claimed by another. The routine
+  way to hit this — reusing a database image or a volume for a second site —
+  now fails loudly with a message naming both facilities.
+- The refusal was verified by running the built binary: the first start claims
+  and serves, the second against the same directory exits.
+
+What this does **not** do is let one deployment serve several facilities. That
+needs `facility_id` on every table, in every primary key and every query, plus
+per-facility caching at the edge and 1:N search restricted to one site — a
+schema migration across the whole system, not a patch. For a multi-site operator
+today the answer is **one deployment and one database per site**, which the guard
+now makes explicit rather than leaving to be discovered.
 
 ### Interoperability is container-level only
 

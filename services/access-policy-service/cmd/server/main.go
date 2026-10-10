@@ -84,6 +84,16 @@ func main() {
 		}
 		defer func() { _ = st.Close() }()
 
+		// Refuse to serve a database that belongs to another facility. Zone
+		// policies, employee roles and anti-passback history are all keyed
+		// without a facility, so two sites sharing one database would merge
+		// their access rules silently - tightening one site's lobby threshold
+		// would quietly change the other's.
+		if err := store.ClaimConfiguredFacility(ctx, st, logger); err != nil {
+			logger.ErrorContext(ctx, "refusing to start", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+
 		if st.Driver() == store.DriverSQLite {
 			logger.WarnContext(ctx,
 				"SQLite policy storage is single-node only; "+

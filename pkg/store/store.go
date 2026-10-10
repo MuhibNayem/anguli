@@ -75,10 +75,24 @@ type Store struct {
 }
 
 // Driver reports the backend in use.
-func (s *Store) Driver() Driver { return s.driver }
+//
+// Nil-safe like every other accessor here. These are read from shutdown and
+// start-up paths where a half-constructed store is normal, and Driver is logged
+// right after Open fails, so a nil store reaching it must not panic.
+func (s *Store) Driver() Driver {
+	if s == nil {
+		return ""
+	}
+	return s.driver
+}
 
 // DB exposes the underlying *sql.DB for callers that need raw access.
-func (s *Store) DB() *sql.DB { return s.db }
+func (s *Store) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
+}
 
 // Open connects to the configured backend and applies the schema.
 func Open(ctx context.Context, cfg Config) (*Store, error) {
@@ -158,7 +172,12 @@ func (s *Store) Close() error {
 }
 
 // DSN returns the effective data source name.
-func (s *Store) DSN() string { return s.dsn }
+func (s *Store) DSN() string {
+	if s == nil {
+		return ""
+	}
+	return s.dsn
+}
 
 // ---------------------------------------------------------------------------
 // Dialect

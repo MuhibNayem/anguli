@@ -144,6 +144,32 @@ CREATE TABLE IF NOT EXISTS pass_events (
 		fmt.Sprintf(`
 CREATE INDEX IF NOT EXISTS idx_pass_events_employee_zone_time
     ON pass_events (employee_id, zone_id, occurred_unix DESC)`),
+
+		// Which facility this database belongs to.
+		//
+		// Every other table in this schema is keyed without a facility: policies
+		// are per zone_id, roles per employee_id, templates per
+		// (employee_id, position). That is correct for a deployment that serves
+		// exactly one facility, and silently wrong for one that is pointed at
+		// two. Two sites with a "lobby" zone would share a single policy row, and
+		// tightening one site's lobby threshold would quietly change the other's.
+		//
+		// Rather than half-scope the schema - scoping policies but not templates
+		// is worse than scoping neither, because it looks isolated and is not -
+		// the single-facility boundary is recorded here and enforced at startup.
+		// ClaimFacility refuses a database that was initialised for a different
+		// facility, so the common way to get this wrong (reusing a database image
+		// or a volume for a second site) fails loudly instead of merging two
+		// sites' access rules.
+		//
+		// An existing deployment claims its facility on first boot and keeps it.
+		fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS deployment_identity (
+    singleton      INTEGER NOT NULL,
+    facility_id    TEXT    NOT NULL,
+    claimed_at_unix BIGINT NOT NULL,
+    PRIMARY KEY (singleton)
+)`),
 	}
 }
 
@@ -205,13 +231,19 @@ func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 }
 
 // firstLine trims a migration statement to something loggable.
+//
+// Leading blank lines are skipped first. Every statement in migrations() is a
+// raw string that begins with a newline, so taking the first line literally
+// returned "" for all of them - and this text exists precisely to name the
+// migration that failed, in the error a failed migration produces.
 func firstLine(s string) string {
+	s = trimSpace(s)
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\n' {
 			return trimSpace(s[:i])
 		}
 	}
-	return trimSpace(s)
+	return s
 }
 
 func trimSpace(s string) string {

@@ -64,6 +64,7 @@ starting a service with an empty one.
 | `READER_KEY` | — (required) | Credential a turnstile presents; must differ from `API_GATEWAY_KEY` |
 | `RATE_LIMIT_RPS` | `10` | Sustained biometric requests per second per caller |
 | `RATE_LIMIT_BURST` | `20` | Instantaneous burst per caller |
+| `FACILITY_ID` | `default` | Which site this deployment serves. Recorded in the database on first boot; the service **refuses to start** if the database already belongs to another facility. One deployment serves one site — see below. |
 | `EDGE_WAL_PATH` | `<EDGE_DATA_DIR>/edge-offline.wal` | Durable offline audit log on the edge node |
 | `OFFLINE_REPLAY_INTERVAL` | `30s` | How often an edge flushes buffered door decisions centrally. A non-positive or malformed value falls back to the default; it never disables the flush. |
 | `STORAGE_DRIVER` | `sqlite` | `sqlite` or `postgres` |
@@ -213,6 +214,39 @@ exactly the window someone already on site would use.
 The operation is **idempotent**. Revoking an employee with no live template
 returns `"revoked": false` with HTTP 200 and `"already_gone": true`, so a
 bulk HR offboarding job can be retried without special-casing partial failures.
+
+### One deployment, one facility
+
+Every table is keyed **without** a facility: policies by `zone_id`, roles by
+`employee_id`, templates by `(employee_id, position)`, anti-passback by
+`(employee_id, zone_id)`. That is correct for a single site. For two it fails
+silently — a London and a Dublin lobby both named `zone-main-gate` share one
+policy row, so tightening one changes the other, with no error anywhere.
+
+So a deployment serves exactly one facility, and says so rather than leaving it
+to be discovered:
+
+```sh
+FACILITY_ID=london-hq STORAGE_DATA_DIR=/data ...
+```
+
+The service records `FACILITY_ID` in the database on first boot. Starting again
+against that database with a different value **refuses to start**, naming both
+facilities:
+
+```
+store: database belongs to a different facility: this database holds access
+policies, templates and anti-passback history for facility "london-hq", but it is
+configured as "dublin-office". Every table here is keyed without a facility, so
+pointing one database at two facilities merges their zone policies and employee
+roles silently. Give each facility its own STORAGE_DATA_DIR, or set FACILITY_ID
+back to "london-hq"
+```
+
+Multi-site therefore means **one deployment and one database per site**, which is
+what the guard enforces. `facility_id` does travel on the wire — the gateway
+stamps it on edge roster syncs — but it identifies the deployment rather than
+partitioning its data.
 
 ### Reading the access audit trail
 

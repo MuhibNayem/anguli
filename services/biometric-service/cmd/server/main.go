@@ -89,6 +89,14 @@ func main() {
 	}
 	defer func() { _ = st.Close() }()
 
+	// Refuse to serve a database that belongs to another facility. Every table
+	// here is keyed without a facility, so two sites sharing one database would
+	// merge their templates and policies silently.
+	if err := store.ClaimConfiguredFacility(ctx, st, logger); err != nil {
+		logger.ErrorContext(ctx, "refusing to start", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
 	logger.InfoContext(ctx, "storage ready",
 		slog.String("driver", string(st.Driver())),
 	)

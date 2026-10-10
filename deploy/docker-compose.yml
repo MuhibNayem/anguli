@@ -22,6 +22,10 @@ services:
       - STORAGE_DRIVER=${STORAGE_DRIVER:-sqlite}
       - STORAGE_DSN=${STORAGE_DSN:-}
       - STORAGE_DATA_DIR=/data
+      # Which facility this deployment serves. Every table is keyed without a
+      # facility, so one database belongs to exactly one site; the service
+      # refuses to start if this database was already claimed by another.
+      - FACILITY_ID=${FACILITY_ID:-default}
     volumes:
       - biometric-data:/data
     healthcheck:
@@ -54,6 +58,10 @@ services:
       - STORAGE_DRIVER=${STORAGE_DRIVER:-sqlite}
       - STORAGE_DSN=${STORAGE_DSN:-}
       - STORAGE_DATA_DIR=/data
+      # Which facility this deployment serves. Every table is keyed without a
+      # facility, so one database belongs to exactly one site; the service
+      # refuses to start if this database was already claimed by another.
+      - FACILITY_ID=${FACILITY_ID:-default}
     volumes:
       - policy-data:/data
     healthcheck:

@@ -16,6 +16,7 @@ import (
 	accesscontrolv1 "finger-scanner/pkg/api/v1/accesscontrol"
 	biometricsv1 "finger-scanner/pkg/api/v1/biometrics"
 	edgegatewayv1 "finger-scanner/pkg/api/v1/edgegateway"
+	"finger-scanner/pkg/store"
 	"finger-scanner/services/api-gateway/internal/clients"
 )
 
@@ -25,6 +26,16 @@ type GatewayHandler struct {
 	// through, which keeps unit tests that build a handler directly working.
 	breakers *clients.Breakers
 	logger   *slog.Logger
+	// facilityID names the facility this gateway serves, and is stamped on the
+	// edge roster syncs it makes.
+	//
+	// It was previously the literal "facility-primary" in both call sites. A
+	// field that exists in the API and is then discarded is worse than no field:
+	// it reads as though facilities were distinguished when nothing distinguished
+	// them. It comes from FACILITY_ID, which the stateful services also use to
+	// claim the database, so one deployment's identity is consistent across the
+	// whole system.
+	facilityID string
 }
 
 func NewGatewayHandler(c *clients.ServiceClients, logger *slog.Logger) *GatewayHandler {
@@ -41,9 +52,10 @@ func NewGatewayHandlerWithBreakers(c *clients.ServiceClients, b *clients.Breaker
 		logger = slog.Default()
 	}
 	return &GatewayHandler{
-		clients:  c,
-		breakers: b,
-		logger:   logger,
+		clients:    c,
+		breakers:   b,
+		logger:     logger,
+		facilityID: store.FacilityIDFromEnv(),
 	}
 }
 
@@ -154,7 +166,7 @@ func (h *GatewayHandler) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		syncResp, syncErr := call(r.Context(), h, clients.DownstreamEdge,
 			func(ctx context.Context) (*edgegatewayv1.SyncFacilityRosterResponse, error) {
 				return h.clients.EdgeGatewayClient.SyncFacilityRoster(ctx, &edgegatewayv1.SyncFacilityRosterRequest{
-					FacilityId: "facility-primary",
+					FacilityId: h.facilityID,
 					Items: []*edgegatewayv1.SyncEmployeeItem{
 						{
 							EmployeeId: req.EmployeeID,
@@ -653,7 +665,7 @@ func (h *GatewayHandler) HandleRevokeTemplate(w http.ResponseWriter, r *http.Req
 	syncResp, syncErr := call(r.Context(), h, clients.DownstreamEdge,
 		func(ctx context.Context) (*edgegatewayv1.SyncFacilityRosterResponse, error) {
 			return h.clients.EdgeGatewayClient.SyncFacilityRoster(ctx, &edgegatewayv1.SyncFacilityRosterRequest{
-				FacilityId: "facility-primary",
+				FacilityId: h.facilityID,
 				Items: []*edgegatewayv1.SyncEmployeeItem{{
 					EmployeeId: req.EmployeeID,
 					Position:   biometricsv1.FingerPosition(req.Position),

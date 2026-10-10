@@ -96,6 +96,16 @@ spec:
             - name: STORAGE_DATA_DIR
               value: /data
             {{- end }}
+            {{/*
+            Facility identity. Every table in this schema is keyed without a
+            facility, so one database belongs to exactly one site. The service
+            claims the database for this value at startup and refuses to run if
+            it was already claimed by another, which turns the routine mistake of
+            reusing a database image or volume for a second site into a loud
+            failure rather than silently merged zone policies and roles.
+            */}}
+            - name: FACILITY_ID
+              value: {{ $root.Values.facilityId | quote }}
             {{- with $c.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

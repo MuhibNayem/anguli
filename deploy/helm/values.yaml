@@ -102,6 +102,19 @@ components:
     healthScheme: http
     persistence: false
 
+# Which physical facility this deployment serves.
+#
+# Every table in the schema is keyed without a facility - policies per zone_id,
+# roles per employee_id, templates per (employee_id, position). That is correct
+# for one site and silently wrong for two: two facilities that both name a zone
+# "lobby" would share a single policy row, so tightening one site's threshold
+# would quietly change the other's with no error anywhere.
+#
+# The services record this value in the database on first boot and refuse to
+# start if the database already belongs to a different facility. Give each site
+# its own storage, and set this per site.
+facilityId: default
+
 # Overload protection for the api-gateway. Bounding concurrency is what turns
 # an overload into a shed 503 instead of an unbounded queue.
 overload:

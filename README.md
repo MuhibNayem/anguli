@@ -143,6 +143,36 @@ statement of what this platform can and cannot do in production, with measured
 numbers. The older `docs/parity.md` and `docs/findings-audit-2026-10-09.md`
 contradict each other and are marked superseded.
 
+### Zone roles and clearance
+
+A zone policy carries `allowed_role`. Access is granted when the employee's role
+ranks at or above it:
+
+| Rank | Roles |
+|---|---|
+| 3 | `SECURITY_ADMIN`, `ADMIN`, `SUPERADMIN` |
+| 2 | `OPERATOR`, `SECURITY_OPERATOR` |
+| 1 | `EMPLOYEE`, `AGENT`, `STAFF` |
+| — | anything else: refused |
+
+An empty `allowed_role` means the zone has no clearance requirement.
+
+An unrecognised role is **refused**, on both sides. Configuring a zone with
+`allowed_role: "ADMINISTRATOR"` — a plausible name that is not in the hierarchy
+— is rejected at configuration time, and if such a rule reaches evaluation
+anyway (written before this check existed, or by a tool bypassing it) the zone
+denies access rather than admitting everyone.
+
+That direction is deliberate. Clearance was once evaluated as
+`roleRank(employee) < roleRank(required)`, and an unrecognised *required* role
+scores 0, so the comparison became `1 < 0` — never true, nothing denied, and the
+zone opened to the whole roster with nothing logged. A zone that stays locked
+until someone spells the role correctly is recoverable; a data centre quietly
+opened to everyone is not.
+
+The check runs identically on the edge's offline path, which is the one that
+executes when the WAN is down.
+
 ### Rotating the template encryption key
 
 `MASTER_KEY` protects every enrolled fingerprint. A leaked key exposes every

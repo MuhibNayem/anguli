@@ -276,10 +276,10 @@ func (s *edgeService) ProcessScan(
 				empRole = emp.Role
 			}
 
-			if rule.AllowedRole != "" && roleRank(empRole) < roleRank(rule.AllowedRole) {
+			if !roleCleared(empRole, rule.AllowedRole) {
 				decision = 2 // ACCESS_DECISION_DENIED_INVALID_ZONE
 				isMatch = false
-				reason = fmt.Sprintf("Access denied (offline cached policy): role '%s' has insufficient clearance for zone requiring '%s'", empRole, rule.AllowedRole)
+				reason = fmt.Sprintf("Access denied (offline cached policy): role '%s' does not satisfy zone requirement '%s'", empRole, rule.AllowedRole)
 				relayDuration = 0
 			} else if rule.RequireBiometrics && bestScore < rule.MinBiometricScore {
 				// 3. Local Biometric Threshold Check
@@ -426,6 +426,35 @@ func roleRank(role string) int {
 	default:
 		return 0
 	}
+}
+
+// roleCleared reports whether an employee's role satisfies a zone's requirement.
+//
+// It fails closed on BOTH sides, which the raw rank comparison did not. The
+// clearance test used to be `roleRank(employee) < roleRank(required)`, and an
+// unrecognised *required* role scores 0, making the test `1 < 0` - false, so
+// nothing was denied and the grant proceeded. The employee side was already
+// safe, because an unknown employee role scores 0 and fails `0 < 1`. Only the
+// required side was fail-open, and the asymmetry is invisible at the call site.
+//
+// So a requirement the system does not recognise denies access. It is not a
+// graceful default: "ADMINISTRATOR" is a perfectly plausible name for a role
+// outside this switch, and configuring a server room with it would otherwise
+// hand the room to every employee and contractor on the roster, silently. A
+// zone locked until the role is spelled correctly is recoverable; a data centre
+// quietly opened to everyone is not.
+//
+// An empty requirement means no clearance requirement, which is a different
+// statement from an unrecognised one and is still allowed.
+func roleCleared(employeeRole, requiredRole string) bool {
+	if requiredRole == "" {
+		return true
+	}
+	required := roleRank(requiredRole)
+	if required == 0 {
+		return false
+	}
+	return roleRank(employeeRole) >= required
 }
 
 // ReplayEvents forwards buffered door decisions to central storage.

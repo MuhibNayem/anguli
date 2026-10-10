@@ -72,6 +72,40 @@ func roleRank(role string) int {
 	}
 }
 
+// roleCleared reports whether an employee's role satisfies a zone's requirement.
+//
+// It fails closed on BOTH sides. The clearance test used to be
+// `roleRank(employee) < roleRank(required)`, and an unrecognised *required*
+// role scores 0, so the test became `1 < 0` - false, nothing was denied, and
+// the grant proceeded. The employee side was already safe, because an unknown
+// employee role scores 0 and fails `0 < 1`; only the required side was
+// fail-open, and the asymmetry is invisible at the call site.
+//
+// So a requirement naming a role this system does not recognise denies access
+// rather than admitting everyone. "ADMINISTRATOR" looks like a role and is not
+// one, and a zone configured with it would otherwise be open to the whole
+// roster with nothing logged.
+//
+// An empty requirement means no clearance requirement, which is a different
+// statement from an unrecognised one and is still permitted.
+func roleCleared(employeeRole, requiredRole string) bool {
+	if strings.TrimSpace(requiredRole) == "" {
+		return true
+	}
+	required := roleRank(requiredRole)
+	if required == 0 {
+		return false
+	}
+	return roleRank(employeeRole) >= required
+}
+
+// knownRole reports whether a role name is one the hierarchy understands. It
+// exists so a misconfiguration can be rejected at the point it is written,
+// rather than only being noticed the first time somebody is refused.
+func knownRole(role string) bool {
+	return strings.TrimSpace(role) == "" || roleRank(role) > 0
+}
+
 func (s *policyService) Evaluate(
 	ctx context.Context,
 	empID, zoneID, doorID string,
@@ -120,7 +154,7 @@ func (s *policyService) Evaluate(
 			empRole = "EMPLOYEE"
 		}
 
-		if roleRank(empRole) < roleRank(rule.AllowedRole) {
+		if !roleCleared(empRole, rule.AllowedRole) {
 			s.logger.WarnContext(ctx, "access denied: insufficient role clearance",
 				slog.String("employee_id", empID),
 				slog.String("employee_role", empRole),
@@ -130,7 +164,7 @@ func (s *policyService) Evaluate(
 			return &EvaluationResult{
 				Decision:            2, // ACCESS_DECISION_DENIED_INVALID_ZONE
 				IsGranted:           false,
-				Reason:              fmt.Sprintf("Access denied: role '%s' has insufficient clearance for zone requiring '%s'", empRole, rule.AllowedRole),
+				Reason:              fmt.Sprintf("Access denied: role '%s' does not satisfy zone requirement '%s'", empRole, rule.AllowedRole),
 				RelayOpenDurationMs: 0,
 			}, nil
 		}
@@ -312,7 +346,24 @@ func (s *policyService) failClosedAudit(ctx context.Context, empID, zoneID strin
 	}, fmt.Errorf("failed to commit pass event audit record: %w", err)
 }
 
+// Configure stores a zone policy.
+//
+// An unrecognised allowed_role is rejected here rather than stored. The
+// evaluation path already denies for one, so this is not the only thing keeping
+// the door shut - but storing it means the zone silently stops admitting
+// everyone at some later moment, and the operator who typed the role has long
+// forgotten. Failing at configuration points the mistake at whoever made it.
 func (s *policyService) Configure(ctx context.Context, rule *domain.PolicyRule) error {
+	if rule == nil {
+		return errors.New("cannot configure a nil policy rule")
+	}
+	if rule.AllowedRole != "" && !knownRole(rule.AllowedRole) {
+		return fmt.Errorf(
+			"policy for zone %q requires role %q, which is not a role this system knows "+
+				"(SECURITY_ADMIN, OPERATOR, EMPLOYEE and their aliases); an unrecognised "+
+				"requirement would deny everyone, so it is rejected rather than stored",
+			rule.ZoneID, rule.AllowedRole)
+	}
 	return s.repo.SaveRule(ctx, rule)
 }
 

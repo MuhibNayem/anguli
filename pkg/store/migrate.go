@@ -70,6 +70,42 @@ CREATE TABLE IF NOT EXISTS access_events (
 CREATE INDEX IF NOT EXISTS idx_access_events_time
     ON access_events (occurred_unix)`),
 
+		// Central audit log for door decisions.
+		//
+		// access_events above was created for this purpose and then never
+		// written by any code path: every turnstile decision was buffered at
+		// the edge and destroyed when the buffer was replayed, so there was no
+		// central record of who was let through which door.
+		//
+		// This is a NEW table rather than a widened access_events on purpose.
+		// The migration runner executes CREATE TABLE IF NOT EXISTS on every
+		// boot, which cannot add a column to a table that already exists, and
+		// SQLite has no ADD COLUMN IF NOT EXISTS to fall back on. An existing
+		// deployment therefore keeps its old empty access_events and gains
+		// this one, which is safe; rewriting the old table's shape would not be.
+		fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS access_audit_events (
+    event_id       TEXT    PRIMARY KEY,
+    turnstile_id   TEXT    NOT NULL DEFAULT '',
+    employee_id    TEXT    NOT NULL DEFAULT '',
+    zone_id        TEXT    NOT NULL DEFAULT '',
+    decision       TEXT    NOT NULL DEFAULT '',
+    access_granted INTEGER NOT NULL DEFAULT 0,
+    processed_offline INTEGER NOT NULL DEFAULT 0,
+    occurred_unix  BIGINT  NOT NULL,
+    recorded_at_unix BIGINT NOT NULL
+)`),
+
+		// event_id is PRIMARY KEY above, so this is the index that makes a
+		// replayed batch idempotent rather than duplicating every door entry.
+		fmt.Sprintf(`
+CREATE INDEX IF NOT EXISTS idx_access_audit_time
+    ON access_audit_events (occurred_unix)`),
+
+		fmt.Sprintf(`
+CREATE INDEX IF NOT EXISTS idx_access_audit_employee
+    ON access_audit_events (employee_id, occurred_unix DESC)`),
+
 		// Access-policy state. These exist so anti-passback survives a restart
 		// AND is shared between replicas: an in-memory rule set means an
 		// employee can be marked "already entered" at one door and "never

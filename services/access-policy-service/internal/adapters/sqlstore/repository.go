@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"finger-scanner/pkg/store"
 	"finger-scanner/services/access-policy-service/internal/domain"
@@ -177,4 +178,175 @@ func (r *Repository) SetEmployeeRole(ctx context.Context, employeeID, role strin
 		return fmt.Errorf("sqlstore: set role for %s: %w", employeeID, err)
 	}
 	return nil
+}
+
+// RecordAccessEvents durably stores door decisions reported by an edge node.
+//
+// Idempotent on event_id. ON CONFLICT DO NOTHING is valid on both SQLite and
+// PostgreSQL, so one statement serves both drivers; RowsAffected distinguishes a
+// newly stored row from one that was already there.
+//
+// The whole batch runs in one transaction. A replay that fails halfway would
+// otherwise leave the edge unable to tell which rows landed, and it would retry
+// the entire batch - which the primary key handles - but only if the partial
+// write is either complete or absent.
+func (r *Repository) RecordAccessEvents(
+	ctx context.Context, events []*domain.AccessAuditEvent,
+) (int, int, error) {
+	if len(events) == 0 {
+		return 0, 0, nil
+	}
+
+	now := store.NowUnix()
+	tx, err := r.st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("sqlstore: begin access audit: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	recorded := 0
+	for _, e := range events {
+		if e == nil || e.EventID == "" {
+			// An event with no id cannot be deduplicated, and a duplicated
+			// audit row is worse than a missing one. Skip it and say so.
+			continue
+		}
+		occurred := e.OccurredUnix
+		if occurred == 0 {
+			occurred = now
+		}
+		res, err := tx.ExecContext(ctx, r.st.Rebind(`
+INSERT INTO access_audit_events
+    (event_id, turnstile_id, employee_id, zone_id, decision, access_granted,
+     processed_offline, occurred_unix, recorded_at_unix)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (event_id) DO NOTHING`),
+			e.EventID, e.TurnstileID, e.EmployeeID, e.ZoneID, e.Decision,
+			boolToInt(e.AccessGranted), boolToInt(e.ProcessedOffline),
+			occurred, now)
+		if err != nil {
+			return 0, 0, fmt.Errorf("sqlstore: record access event %s: %w", e.EventID, err)
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			recorded++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("sqlstore: commit access audit: %w", err)
+	}
+	return recorded, len(events) - recorded, nil
+}
+
+// QueryAccessEvents returns a page of the audit trail, newest first.
+//
+// The row is selected with limit+1 so the caller can tell "there is more" from
+// "this is the last page" without a second COUNT query, which on a large trail
+// is far more expensive than the page itself.
+//
+// Filters are built as parameterised fragments rather than interpolated strings.
+// The only value ever interpolated is the clamped page size, which is a Go int
+// this function produced itself; every caller-supplied string is a bound
+// parameter, so an employee id containing a quote cannot reach the SQL.
+func (r *Repository) QueryAccessEvents(
+	ctx context.Context, filter domain.AccessEventFilter,
+) ([]*domain.AccessAuditEvent, int64, string, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = domain.DefaultAuditQueryLimit
+	}
+	if limit > domain.MaxAuditQueryLimit {
+		limit = domain.MaxAuditQueryLimit
+	}
+
+	var where []string
+	var args []any
+	if filter.EmployeeID != "" {
+		where = append(where, "employee_id = ?")
+		args = append(args, filter.EmployeeID)
+	}
+	if filter.ZoneID != "" {
+		where = append(where, "zone_id = ?")
+		args = append(args, filter.ZoneID)
+	}
+	if filter.TurnstileID != "" {
+		where = append(where, "turnstile_id = ?")
+		args = append(args, filter.TurnstileID)
+	}
+	if filter.FromUnix > 0 {
+		where = append(where, "occurred_unix >= ?")
+		args = append(args, filter.FromUnix)
+	}
+	if filter.ToUnix > 0 {
+		where = append(where, "occurred_unix <= ?")
+		args = append(args, filter.ToUnix)
+	}
+	switch filter.Outcome {
+	case domain.OutcomeGranted:
+		where = append(where, "access_granted = 1")
+	case domain.OutcomeDenied:
+		where = append(where, "access_granted = 0")
+	}
+	// Keyset pagination. Written out rather than as a row-value comparison
+	// because SQLite and PostgreSQL both support it but the expanded form is
+	// unambiguous across versions.
+	if filter.CursorEventID != "" {
+		where = append(where, "(occurred_unix < ? OR (occurred_unix = ? AND event_id < ?))")
+		args = append(args, filter.CursorUnix, filter.CursorUnix, filter.CursorEventID)
+	}
+
+	query := `
+SELECT event_id, turnstile_id, employee_id, zone_id, decision, access_granted,
+       processed_offline, occurred_unix
+FROM access_audit_events`
+	if len(where) > 0 {
+		query += "\nWHERE " + strings.Join(where, " AND ")
+	}
+	// Ties on occurred_unix are broken by event_id so the order is total and the
+	// cursor never skips or repeats a row. Without the tiebreak two events in
+	// the same second could page indefinitely.
+	query += "\nORDER BY occurred_unix DESC, event_id DESC\nLIMIT ?"
+	args = append(args, limit+1)
+
+	rows, err := r.st.DB().QueryContext(ctx, r.st.Rebind(query), args...)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("sqlstore: query access audit: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]*domain.AccessAuditEvent, 0, limit+1)
+	for rows.Next() {
+		var e domain.AccessAuditEvent
+		var granted, offline int
+		if err := rows.Scan(&e.EventID, &e.TurnstileID, &e.EmployeeID, &e.ZoneID,
+			&e.Decision, &granted, &offline, &e.OccurredUnix); err != nil {
+			return nil, 0, "", fmt.Errorf("sqlstore: scan access audit: %w", err)
+		}
+		e.AccessGranted = granted != 0
+		e.ProcessedOffline = offline != 0
+		out = append(out, &e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, "", fmt.Errorf("sqlstore: read access audit: %w", err)
+	}
+
+	var nextUnix int64
+	var nextID string
+	if len(out) > limit {
+		// The extra row is the proof there is another page. Drop it and point
+		// the cursor at the last row actually returned.
+		last := out[limit-1]
+		nextUnix = last.OccurredUnix
+		nextID = last.EventID
+		out = out[:limit]
+	}
+	return out, nextUnix, nextID, nil
+}
+
+// boolToInt renders a Go bool as the 0/1 an INTEGER column expects.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

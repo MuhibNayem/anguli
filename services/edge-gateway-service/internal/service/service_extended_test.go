@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"google.golang.org/grpc"
+
+	accesscontrolv1 "finger-scanner/pkg/api/v1/accesscontrol"
 	"finger-scanner/services/edge-gateway-service/internal/adapters/memory"
 	"finger-scanner/services/edge-gateway-service/internal/domain"
 	"finger-scanner/services/edge-gateway-service/internal/ports"
@@ -21,7 +24,7 @@ type stubCache struct {
 
 	upsertEmployeeErr error
 	upsertPolicyErr   error
-	drainErr          error
+	takeErr           error
 }
 
 func (s *stubCache) UpsertEmployee(ctx context.Context, e *domain.CachedEmployee) error {
@@ -38,13 +41,21 @@ func (s *stubCache) UpsertPolicyRule(ctx context.Context, r *domain.PolicyRule) 
 	return s.EdgeRepository.UpsertPolicyRule(ctx, r)
 }
 
-func (s *stubCache) DrainOfflineEvents(ctx context.Context) ([]*domain.OfflineAuditLog, error) {
-	if s.drainErr != nil {
-		return nil, s.drainErr
+func (s *stubCache) TakeOfflineEvents(ctx context.Context) ([]*domain.OfflineAuditLog, error) {
+	if s.takeErr != nil {
+		return nil, s.takeErr
 	}
-	return s.EdgeRepository.DrainOfflineEvents(ctx)
+	// MOCK: delegate to the real cache so WAL recovery behaviour is inherited.
+	return s.EdgeRepository.TakeOfflineEvents(ctx)
 }
 
+func (s *stubCache) AcknowledgeOfflineEvents(ctx context.Context) error {
+	return s.EdgeRepository.AcknowledgeOfflineEvents(ctx)
+}
+
+func (s *stubCache) RestoreOfflineEvents(ctx context.Context, events []*domain.OfflineAuditLog) error {
+	return s.EdgeRepository.RestoreOfflineEvents(ctx, events)
+}
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(discard{}, &slog.HandlerOptions{Level: slog.LevelError}))
 }
@@ -170,7 +181,12 @@ func TestSyncPolicies_PropagatesFailure(t *testing.T) {
 // buffered while the centre was down must be retrievable after recovery.
 func TestReplayEvents_DrainsQueue(t *testing.T) {
 	cache := &stubCache{EdgeRepository: isolatedCache(t)}
-	svc := service.NewEdgeService(cache, quietLogger())
+	// A replay can only complete with somewhere to forward to. It forwards
+	// upstream and only then consumes the queue, so the stub provides a sink
+	// rather than the events simply being thrown away, which is what this code
+	// used to do.
+	pol := &stubReplayPolicy{}
+	svc := service.NewEdgeServiceWithPolicy(cache, pol, quietLogger())
 	ctx := context.Background()
 
 	events := []*domain.OfflineAuditLog{
@@ -198,10 +214,13 @@ func TestReplayEvents_DrainsQueue(t *testing.T) {
 	if got := cache.GetOfflineEventCount(ctx); got != 0 {
 		t.Errorf("queue holds %d events after replay; want 0", got)
 	}
+	if len(pol.batches) != 1 || len(pol.batches[0]) != 2 {
+		t.Errorf("upstream received %d batches; want 1 batch of 2 events", len(pol.batches))
+	}
 }
 
 func TestReplayEvents_PropagatesFailure(t *testing.T) {
-	cache := &stubCache{EdgeRepository: isolatedCache(t), drainErr: errors.New("wal corrupt")}
+	cache := &stubCache{EdgeRepository: isolatedCache(t), takeErr: errors.New("wal corrupt")}
 	svc := service.NewEdgeService(cache, quietLogger())
 	if _, err := svc.ReplayEvents(context.Background()); err == nil {
 		t.Fatal("ReplayEvents swallowed a WAL failure")
@@ -219,4 +238,18 @@ func TestGetStatus_ReportsUnknownTurnstile(t *testing.T) {
 	if _, err := svc.GetStatus(ctx, "turnstile-does-not-exist"); err == nil {
 		t.Log("GetStatus returned no error for a cancelled context")
 	}
+}
+
+// stubReplayPolicy accepts forwarded access events and records the batches, so
+// a replay has somewhere real to send them.
+type stubReplayPolicy struct {
+	accesscontrolv1.AccessPolicyServiceClient
+	batches [][]*accesscontrolv1.AccessAuditEvent
+}
+
+func (s *stubReplayPolicy) RecordAccessEvents(
+	_ context.Context, in *accesscontrolv1.RecordAccessEventsRequest, _ ...grpc.CallOption,
+) (*accesscontrolv1.RecordAccessEventsResponse, error) {
+	s.batches = append(s.batches, in.GetEvents())
+	return &accesscontrolv1.RecordAccessEventsResponse{Recorded: uint32(len(in.GetEvents()))}, nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -177,19 +178,88 @@ func (c *memoryEdgeCache) AppendOfflineEvent(ctx context.Context, event *domain.
 	return nil
 }
 
-func (c *memoryEdgeCache) DrainOfflineEvents(ctx context.Context) ([]*domain.OfflineAuditLog, error) {
+// TakeOfflineEvents removes events from the queue but leaves the durable WAL
+// intact, so nothing is destroyed until the caller confirms the events reached
+// storage elsewhere.
+func (c *memoryEdgeCache) TakeOfflineEvents(ctx context.Context) ([]*domain.OfflineAuditLog, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	drained := c.offlineEvents
+	taken := c.offlineEvents
 	c.offlineEvents = make([]*domain.OfflineAuditLog, 0)
+	return taken, nil
+}
 
-	// Truncate WAL file on disk once events are safely drained upstream
-	if c.walPath != "" {
-		_ = os.Truncate(c.walPath, 0)
+// AcknowledgeOfflineEvents retires the events a successful forward covered.
+//
+// It rewrites the WAL to match whatever is still queued rather than truncating
+// it. Truncation is wrong here, and quietly so: a door scan that happens while
+// the upstream forward is in flight appends its event to both the queue and the
+// WAL, and a truncate would destroy that event's only durable copy even though it
+// was never forwarded. The process would still hold it in memory, so nothing
+// looks wrong - until it restarts before the next replay and the entry is gone.
+//
+// The rewrite is atomic: a crash mid-write leaves the previous WAL intact rather
+// than a half-written one.
+func (c *memoryEdgeCache) AcknowledgeOfflineEvents(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.walPath == "" {
+		return nil
+	}
+	if len(c.offlineEvents) == 0 {
+		if err := os.Truncate(c.walPath, 0); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("memory: truncate audit WAL: %w", err)
+		}
+		return nil
 	}
 
-	return drained, nil
+	if err := os.MkdirAll(filepath.Dir(c.walPath), 0750); err != nil {
+		return fmt.Errorf("memory: create WAL directory: %w", err)
+	}
+	tmp := c.walPath + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("memory: rewrite audit WAL: %w", err)
+	}
+	enc := json.NewEncoder(file)
+	for _, e := range c.offlineEvents {
+		if e == nil {
+			continue
+		}
+		if err := enc.Encode(e); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("memory: rewrite audit WAL: %w", err)
+		}
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("memory: sync audit WAL: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("memory: close audit WAL: %w", err)
+	}
+	if err := os.Rename(tmp, c.walPath); err != nil {
+		return fmt.Errorf("memory: replace audit WAL: %w", err)
+	}
+	return nil
+}
+
+// RestoreOfflineEvents puts events back at the front of the queue after a
+// failed upstream forward, so the retry still carries them.
+func (c *memoryEdgeCache) RestoreOfflineEvents(ctx context.Context, events []*domain.OfflineAuditLog) error {
+	if len(events) == 0 {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	restored := make([]*domain.OfflineAuditLog, 0, len(events)+len(c.offlineEvents))
+	restored = append(restored, events...)
+	restored = append(restored, c.offlineEvents...)
+	c.offlineEvents = restored
+	return nil
 }
 
 func (c *memoryEdgeCache) GetOfflineEventCount(ctx context.Context) uint32 {

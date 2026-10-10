@@ -64,6 +64,8 @@ starting a service with an empty one.
 | `READER_KEY` | — (required) | Credential a turnstile presents; must differ from `API_GATEWAY_KEY` |
 | `RATE_LIMIT_RPS` | `10` | Sustained biometric requests per second per caller |
 | `RATE_LIMIT_BURST` | `20` | Instantaneous burst per caller |
+| `EDGE_WAL_PATH` | `<EDGE_DATA_DIR>/edge-offline.wal` | Durable offline audit log on the edge node |
+| `OFFLINE_REPLAY_INTERVAL` | `30s` | How often an edge flushes buffered door decisions centrally. A non-positive or malformed value falls back to the default; it never disables the flush. |
 | `STORAGE_DRIVER` | `sqlite` | `sqlite` or `postgres` |
 | `STORAGE_DSN` | — | Postgres URL; ignored for SQLite |
 | `STORAGE_DATA_DIR` | `data` | Where the SQLite file lives |
@@ -211,6 +213,46 @@ exactly the window someone already on site would use.
 The operation is **idempotent**. Revoking an employee with no live template
 returns `"revoked": false` with HTTP 200 and `"already_gone": true`, so a
 bulk HR offboarding job can be retried without special-casing partial failures.
+
+### Reading the access audit trail
+
+Every door decision made at an edge node is buffered to that node's durable WAL
+and flushed to central storage on a timer (`OFFLINE_REPLAY_INTERVAL`, 30s
+default). The trail is admin-only and rate limited:
+
+```sh
+curl -G http://localhost:8080/api/v1/audit/access-events \
+  -H "X-API-Key: $API_GATEWAY_KEY" \
+  --data-urlencode 'employee_id=EMP-1042' \
+  --data-urlencode 'zone_id=zone-main-gate' \
+  --data-urlencode 'from_unix=1700000000' \
+  --data-urlencode 'outcome=granted' \
+  --data-urlencode 'limit=100'
+```
+
+```json
+{"events":[{"event_id":"...","turnstile_id":"turnstile-01","employee_id":"EMP-1042",
+  "zone_id":"zone-main-gate","decision":"granted offline","access_granted":true,
+  "processed_offline":true,"occurred_unix":1700000000}],
+ "next_page_token":"eyJ1IjoxNzAwMDAwMDAwLCJlIjoiZXZ0LTEifQ"}
+```
+
+Filters (`employee_id`, `zone_id`, `turnstile_id`, `from_unix`, `to_unix`,
+`outcome=granted|denied`) combine with AND; empty means "any". Pass
+`next_page_token` back to continue.
+
+Paging is **keyset**, not offset. The trail is append-only and a replay lands
+mid-scan as a matter of routine, so an offset cursor would shift every later page
+and silently skip events — which during an investigation looks exactly like the
+person never having entered. Each row carries `processed_offline`, because a
+decision the edge made from cached policy during an outage is materially
+different from one taken against live central policy, and only the flag
+distinguishes them.
+
+Recording is idempotent on `event_id`, so a retried replay never double-counts a
+door entry. The edge keeps its copy until the forward is confirmed; if the
+forward fails, the events stay on the edge and the failure is logged rather than
+swallowed.
 
 ### Rate limiting the biometric endpoints
 

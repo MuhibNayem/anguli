@@ -100,3 +100,79 @@ func (s *Server) ResetAntiPassback(ctx context.Context, req *accesscontrolv1.Res
 		Message: "Anti-passback reset for employee",
 	}, nil
 }
+
+// RecordAccessEvents stores door decisions forwarded by an edge node.
+func (s *Server) RecordAccessEvents(
+	ctx context.Context, req *accesscontrolv1.RecordAccessEventsRequest,
+) (*accesscontrolv1.RecordAccessEventsResponse, error) {
+	events := make([]*domain.AccessAuditEvent, 0, len(req.GetEvents()))
+	for _, e := range req.GetEvents() {
+		if e == nil {
+			continue
+		}
+		events = append(events, &domain.AccessAuditEvent{
+			EventID:          e.GetEventId(),
+			TurnstileID:      e.GetTurnstileId(),
+			EmployeeID:       e.GetEmployeeId(),
+			ZoneID:           e.GetZoneId(),
+			Decision:         e.GetDecision(),
+			AccessGranted:    e.GetAccessGranted(),
+			ProcessedOffline: e.GetProcessedOffline(),
+			OccurredUnix:     e.GetOccurredUnix(),
+		})
+	}
+
+	recorded, duplicates, err := s.svc.RecordAccessEvents(ctx, events)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "record access events: %v", err)
+	}
+	return &accesscontrolv1.RecordAccessEventsResponse{
+		Recorded:   uint32(recorded),
+		Duplicates: uint32(duplicates),
+	}, nil
+}
+
+// QueryAccessEvents reads the central access audit trail.
+func (s *Server) QueryAccessEvents(
+	ctx context.Context, req *accesscontrolv1.QueryAccessEventsRequest,
+) (*accesscontrolv1.QueryAccessEventsResponse, error) {
+	filter := domain.AccessEventFilter{
+		EmployeeID:  req.GetEmployeeId(),
+		ZoneID:      req.GetZoneId(),
+		TurnstileID: req.GetTurnstileId(),
+		FromUnix:    req.GetFromUnix(),
+		ToUnix:      req.GetToUnix(),
+		Limit:       int(req.GetLimit()),
+	}
+	switch req.GetOutcome() {
+	case accesscontrolv1.AccessEventOutcome_ACCESS_EVENT_OUTCOME_GRANTED:
+		filter.Outcome = domain.OutcomeGranted
+	case accesscontrolv1.AccessEventOutcome_ACCESS_EVENT_OUTCOME_DENIED:
+		filter.Outcome = domain.OutcomeDenied
+	default:
+		filter.Outcome = domain.OutcomeAny
+	}
+
+	events, next, err := s.svc.QueryAccessEvents(ctx, filter, req.GetPageToken())
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*accesscontrolv1.AccessAuditEvent, 0, len(events))
+	for _, e := range events {
+		out = append(out, &accesscontrolv1.AccessAuditEvent{
+			EventId:          e.EventID,
+			TurnstileId:      e.TurnstileID,
+			EmployeeId:       e.EmployeeID,
+			ZoneId:           e.ZoneID,
+			Decision:         e.Decision,
+			AccessGranted:    e.AccessGranted,
+			ProcessedOffline: e.ProcessedOffline,
+			OccurredUnix:     e.OccurredUnix,
+		})
+	}
+	return &accesscontrolv1.QueryAccessEventsResponse{
+		Events:        out,
+		NextPageToken: next,
+	}, nil
+}

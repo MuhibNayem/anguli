@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"finger-scanner/services/access-policy-service/internal/domain"
@@ -27,6 +28,10 @@ type memoryPolicyRepo struct {
 	// employee:zone. See WithPassEventLock.
 	passLocksMu sync.Mutex
 	passLocks   map[string]*sync.Mutex
+
+	// accessAudit holds recorded door decisions keyed by their event id, which
+	// is what makes a replayed batch idempotent.
+	accessAudit map[string]domain.AccessAuditEvent
 }
 
 // NewMemoryPolicyRepository creates a thread-safe repository with standard enterprise defaults.
@@ -36,6 +41,7 @@ func NewMemoryPolicyRepository() ports.PolicyRepository {
 		passEvents:    make(map[string]*domain.PassEvent),
 		employeeRoles: make(map[string]string),
 		passLocks:     make(map[string]*sync.Mutex),
+		accessAudit:   make(map[string]domain.AccessAuditEvent),
 	}
 
 	// Seed standard default enterprise security zones
@@ -138,6 +144,113 @@ func (r *memoryPolicyRepo) GetLastPassEvent(ctx context.Context, employeeID, zon
 		return nil, ports.ErrNotFound
 	}
 	return event, nil
+}
+
+// RecordAccessEvents stores door decisions in memory, deduplicating on event id
+// exactly as the durable adapter does, so behaviour does not depend on which
+// backend a deployment selected.
+func (r *memoryPolicyRepo) RecordAccessEvents(
+	ctx context.Context, events []*domain.AccessAuditEvent,
+) (int, int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	recorded, skipped := 0, 0
+	for _, e := range events {
+		if e == nil || e.EventID == "" {
+			skipped++
+			continue
+		}
+		if _, seen := r.accessAudit[e.EventID]; seen {
+			skipped++
+			continue
+		}
+		cp := *e
+		if r.accessAudit == nil {
+			r.accessAudit = make(map[string]domain.AccessAuditEvent)
+		}
+		r.accessAudit[e.EventID] = cp
+		recorded++
+	}
+	return recorded, skipped, nil
+}
+
+// QueryAccessEvents returns a page of the audit trail newest-first, mirroring the
+// durable adapter's filters, ordering and cursor exactly.
+//
+// The shared ordering test in the service package runs against both adapters. A
+// test stub that quietly disagreed with the real one is how a security test ends
+// up passing for the wrong reason.
+func (r *memoryPolicyRepo) QueryAccessEvents(
+	_ context.Context, filter domain.AccessEventFilter,
+) ([]*domain.AccessAuditEvent, int64, string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = domain.DefaultAuditQueryLimit
+	}
+	if limit > domain.MaxAuditQueryLimit {
+		limit = domain.MaxAuditQueryLimit
+	}
+
+	matched := make([]*domain.AccessAuditEvent, 0, len(r.accessAudit))
+	for _, e := range r.accessAudit {
+		if filter.EmployeeID != "" && e.EmployeeID != filter.EmployeeID {
+			continue
+		}
+		if filter.ZoneID != "" && e.ZoneID != filter.ZoneID {
+			continue
+		}
+		if filter.TurnstileID != "" && e.TurnstileID != filter.TurnstileID {
+			continue
+		}
+		if filter.FromUnix > 0 && e.OccurredUnix < filter.FromUnix {
+			continue
+		}
+		if filter.ToUnix > 0 && e.OccurredUnix > filter.ToUnix {
+			continue
+		}
+		switch filter.Outcome {
+		case domain.OutcomeGranted:
+			if !e.AccessGranted {
+				continue
+			}
+		case domain.OutcomeDenied:
+			if e.AccessGranted {
+				continue
+			}
+		}
+		if filter.CursorEventID != "" {
+			afterCursor := e.OccurredUnix < filter.CursorUnix ||
+				(e.OccurredUnix == filter.CursorUnix && e.EventID < filter.CursorEventID)
+			if !afterCursor {
+				continue
+			}
+		}
+		cp := e
+		matched = append(matched, &cp)
+	}
+
+	// Total order, newest first, with event id breaking ties on the timestamp so
+	// the cursor cannot skip or repeat a row.
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].OccurredUnix != matched[j].OccurredUnix {
+			return matched[i].OccurredUnix > matched[j].OccurredUnix
+		}
+		return matched[i].EventID > matched[j].EventID
+	})
+
+	var nextUnix int64
+	var nextID string
+	if len(matched) > limit {
+		last := matched[limit-1]
+		nextUnix = last.OccurredUnix
+		nextID = last.EventID
+		matched = matched[:limit]
+	}
+	return matched, nextUnix, nextID, nil
 }
 
 func (r *memoryPolicyRepo) RecordPassEvent(ctx context.Context, event *domain.PassEvent) error {

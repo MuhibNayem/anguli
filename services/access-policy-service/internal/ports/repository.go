@@ -23,6 +23,27 @@ var ErrNotFound = errors.New("policy: not found")
 // Implementations must return ErrNotFound - never (nil, nil) - when a row is
 // absent, so callers can branch on it without importing an adapter.
 type PolicyRepository interface {
+	// RecordAccessEvents durably stores door decisions and returns how many
+	// were newly stored and how many were already present.
+	//
+	// Recording is idempotent on the event id because a partial failure is the
+	// normal case for a batched replay: the edge cannot know which rows
+	// upstream committed before the connection dropped, so it retries the whole
+	// batch and the primary key does the deduplication. Without that, a single
+	// interrupted replay would double every door entry it contained, and a
+	// duplicated audit trail is worse than a missing one because it destroys
+	// trust in the whole log.
+	RecordAccessEvents(ctx context.Context, events []*domain.AccessAuditEvent) (recorded int, duplicates int, err error)
+
+	// QueryAccessEvents returns a page of the audit trail, newest first, and the
+	// cursor to continue from. An empty next cursor means the result is
+	// exhausted.
+	//
+	// The read path exists because recording alone does not make an audit trail.
+	// Data no application can query answers none of the questions an audit trail
+	// exists to answer.
+	QueryAccessEvents(ctx context.Context, filter domain.AccessEventFilter) (events []*domain.AccessAuditEvent, nextCursorUnix int64, nextCursorEventID string, err error)
+
 	SaveRule(ctx context.Context, rule *domain.PolicyRule) error
 	GetRule(ctx context.Context, zoneID string) (*domain.PolicyRule, error)
 	GetLastPassEvent(ctx context.Context, employeeID, zoneID string) (*domain.PassEvent, error)

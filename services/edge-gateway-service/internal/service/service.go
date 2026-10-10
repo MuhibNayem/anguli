@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -333,6 +334,7 @@ func (s *edgeService) ProcessScan(
 		EventID:       uuid.New().String(),
 		TurnstileID:   turnstileID,
 		EmployeeID:    matchedEmpID,
+		ZoneID:        zoneID,
 		AccessGranted: isMatch && relayDuration > 0,
 		Decision:      reason,
 		TimestampUnix: time.Now().Unix(),
@@ -426,6 +428,92 @@ func roleRank(role string) int {
 	}
 }
 
+// ReplayEvents forwards buffered door decisions to central storage.
+//
+// The previous implementation drained the queue and returned the events to a
+// caller that discarded them, while truncating the durable WAL in the same
+// call. That is the worst possible shape: replaying destroyed the only copy of
+// the audit trail, and the central access_events table was never written by any
+// code path, so nothing replaced it.
+//
+// The sequence is now take -> forward -> acknowledge. The WAL is truncated only
+// after the forward is confirmed, and a failure restores the events so the next
+// attempt still carries them. Because recording upstream deduplicates on
+// event_id, a retry after a partially-committed batch is safe.
 func (s *edgeService) ReplayEvents(ctx context.Context) ([]*domain.OfflineAuditLog, error) {
-	return s.cache.DrainOfflineEvents(ctx)
+	taken, err := s.cache.TakeOfflineEvents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(taken) == 0 {
+		return nil, nil
+	}
+
+	if s.policyClient == nil {
+		// No upstream configured. The events must go back, not be dropped.
+		_ = s.cache.RestoreOfflineEvents(ctx, taken)
+		return nil, errors.New("edge: cannot replay offline events, no access-policy client is configured")
+	}
+
+	// Batch, so a long outage does not produce one RPC per door entry.
+	const batchSize = 200
+	for start := 0; start < len(taken); start += batchSize {
+		end := start + batchSize
+		if end > len(taken) {
+			end = len(taken)
+		}
+		chunk := taken[start:end]
+		if err := s.forwardAccessEvents(ctx, chunk); err != nil {
+			// Put back everything not yet confirmed, including this chunk:
+			// upstream may have committed part of it, and the event ids make
+			// the retry idempotent.
+			_ = s.cache.RestoreOfflineEvents(ctx, taken[start:])
+			s.logger.ErrorContext(ctx, "offline audit replay failed; events retained",
+				slog.Int("retained", len(taken)-start),
+				slog.String("error", err.Error()),
+			)
+			return nil, err
+		}
+	}
+
+	if err := s.cache.AcknowledgeOfflineEvents(ctx); err != nil {
+		// The events are stored upstream, so this is a retention problem
+		// rather than a lost-audit problem. Report it rather than pretend the
+		// replay was clean.
+		s.logger.ErrorContext(ctx, "offline audit replay succeeded but the local WAL could not be truncated",
+			slog.String("error", err.Error()),
+		)
+		return taken, nil
+	}
+
+	s.logger.InfoContext(ctx, "offline access events replayed to central storage",
+		slog.Int("events", len(taken)),
+	)
+	return taken, nil
+}
+
+// forwardAccessEvents sends one batch of door decisions upstream.
+func (s *edgeService) forwardAccessEvents(ctx context.Context, events []*domain.OfflineAuditLog) error {
+	req := &accesscontrolv1.RecordAccessEventsRequest{
+		Events: make([]*accesscontrolv1.AccessAuditEvent, 0, len(events)),
+	}
+	for _, e := range events {
+		req.Events = append(req.Events, &accesscontrolv1.AccessAuditEvent{
+			EventId:          e.EventID,
+			TurnstileId:      e.TurnstileID,
+			EmployeeId:       e.EmployeeID,
+			ZoneId:           e.ZoneID,
+			Decision:         e.Decision,
+			AccessGranted:    e.AccessGranted,
+			ProcessedOffline: true,
+			OccurredUnix:     e.TimestampUnix,
+		})
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := s.policyClient.RecordAccessEvents(callCtx, req); err != nil {
+		return err
+	}
+	return nil
 }

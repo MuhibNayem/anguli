@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -407,6 +409,114 @@ func (h *GatewayHandler) HandleResetAPB(w http.ResponseWriter, r *http.Request) 
 	}
 
 	h.writeJSON(w, http.StatusOK, resp)
+}
+
+// HandleQueryAccessEvents exposes the central access audit trail to operators.
+//
+// Admin-only, not reader: the trail enumerates who entered which door and when,
+// across the whole estate. A turnstile credential can grant itself entry; it must
+// not be able to read the movement history of everyone.
+func (h *GatewayHandler) HandleQueryAccessEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	q := r.URL.Query()
+	req := &accesscontrolv1.QueryAccessEventsRequest{
+		EmployeeId:  q.Get("employee_id"),
+		ZoneId:      q.Get("zone_id"),
+		TurnstileId: q.Get("turnstile_id"),
+		PageToken:   q.Get("page_token"),
+	}
+	var err error
+	if req.FromUnix, err = optionalUnix(q.Get("from_unix")); err != nil {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from_unix must be a whole number of seconds"})
+		return
+	}
+	if req.ToUnix, err = optionalUnix(q.Get("to_unix")); err != nil {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to_unix must be a whole number of seconds"})
+		return
+	}
+	switch q.Get("outcome") {
+	case "":
+	case "granted":
+		req.Outcome = accesscontrolv1.AccessEventOutcome_ACCESS_EVENT_OUTCOME_GRANTED
+	case "denied":
+		req.Outcome = accesscontrolv1.AccessEventOutcome_ACCESS_EVENT_OUTCOME_DENIED
+	default:
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "outcome must be one of granted, denied"})
+		return
+	}
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be a non-negative integer"})
+			return
+		}
+		req.Limit = uint32(n)
+	}
+
+	resp, err := call(r.Context(), h, clients.DownstreamPolicy,
+		func(ctx context.Context) (*accesscontrolv1.QueryAccessEventsResponse, error) {
+			return h.clients.AccessPolicyClient.QueryAccessEvents(ctx, req)
+		})
+	if err != nil {
+		h.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Rendered as plain JSON objects rather than protojson so the wire shape is
+	// stable for an operator's tooling; the proto field names are snake_case
+	// already, so the mapping is mechanical.
+	type event struct {
+		EventID          string `json:"event_id"`
+		TurnstileID      string `json:"turnstile_id"`
+		EmployeeID       string `json:"employee_id"`
+		ZoneID           string `json:"zone_id"`
+		Decision         string `json:"decision"`
+		AccessGranted    bool   `json:"access_granted"`
+		ProcessedOffline bool   `json:"processed_offline"`
+		OccurredUnix     int64  `json:"occurred_unix"`
+	}
+	out := make([]event, 0, len(resp.GetEvents()))
+	for _, e := range resp.GetEvents() {
+		out = append(out, event{
+			EventID:          e.GetEventId(),
+			TurnstileID:      e.GetTurnstileId(),
+			EmployeeID:       e.GetEmployeeId(),
+			ZoneID:           e.GetZoneId(),
+			Decision:         e.GetDecision(),
+			AccessGranted:    e.GetAccessGranted(),
+			ProcessedOffline: e.GetProcessedOffline(),
+			OccurredUnix:     e.GetOccurredUnix(),
+		})
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"events":          out,
+		"next_page_token": resp.GetNextPageToken(),
+	})
+}
+
+// optionalUnix parses an optional epoch-seconds parameter. An empty value means
+// unbounded rather than zero, so "no filter" and "since 1970" stay distinct.
+//
+// A negative value is rejected rather than passed on. Downstream, a non-positive
+// bound means "unbounded", so -5 would be read as no filter at all: an operator
+// who mistypes a date would get the entire trail back and draw a conclusion from
+// it. Rejecting is the only safe reading.
+func optionalUnix(raw string) (int64, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("must not be negative")
+	}
+	return n, nil
 }
 
 // HandleHealthz performs live end-to-end health checks against downstream gRPC microservices (Fix L1).

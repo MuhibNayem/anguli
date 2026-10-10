@@ -91,6 +91,12 @@ func main() {
 	edgeSvc := service.NewEdgeServiceWithPolicy(cache, policyClient, logger)
 	grpcServerHandler := grpchandler.NewServer(edgeSvc)
 
+	// Flush the offline audit WAL on a timer. Without this the node buffers every
+	// door decision during an outage and never sends any of them: the replay RPC
+	// exists, but nothing in a running process invoked it, so the audit trail
+	// stayed on one edge machine's disk until an operator made the call by hand.
+	go service.RunOfflineReplayLoop(ctx, edgeSvc, offlineReplayInterval(logger), logger)
+
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to bind TCP port", slog.String("error", err.Error()))
@@ -138,4 +144,24 @@ func main() {
 		logger.ErrorContext(ctx, "server exited unexpectedly", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
+}
+
+// offlineReplayInterval reads OFFLINE_REPLAY_INTERVAL. A malformed or
+// non-positive value falls back to the default rather than disabling the flush,
+// because the safe reading of "0" is ambiguous and quietly never replaying would
+// recreate the exact gap this loop exists to close.
+func offlineReplayInterval(logger *slog.Logger) time.Duration {
+	raw := os.Getenv("OFFLINE_REPLAY_INTERVAL")
+	if raw == "" {
+		return service.DefaultOfflineReplayInterval
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		logger.WarnContext(context.Background(),
+			"ignoring invalid OFFLINE_REPLAY_INTERVAL; using the default",
+			slog.String("value", raw),
+			slog.Duration("default", service.DefaultOfflineReplayInterval))
+		return service.DefaultOfflineReplayInterval
+	}
+	return d
 }

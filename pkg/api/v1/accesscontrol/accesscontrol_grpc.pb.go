@@ -19,10 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AccessPolicyService_EvaluateAccess_FullMethodName    = "/accesscontrol.v1.AccessPolicyService/EvaluateAccess"
-	AccessPolicyService_ConfigurePolicy_FullMethodName   = "/accesscontrol.v1.AccessPolicyService/ConfigurePolicy"
-	AccessPolicyService_GetPolicy_FullMethodName         = "/accesscontrol.v1.AccessPolicyService/GetPolicy"
-	AccessPolicyService_ResetAntiPassback_FullMethodName = "/accesscontrol.v1.AccessPolicyService/ResetAntiPassback"
+	AccessPolicyService_EvaluateAccess_FullMethodName     = "/accesscontrol.v1.AccessPolicyService/EvaluateAccess"
+	AccessPolicyService_ConfigurePolicy_FullMethodName    = "/accesscontrol.v1.AccessPolicyService/ConfigurePolicy"
+	AccessPolicyService_GetPolicy_FullMethodName          = "/accesscontrol.v1.AccessPolicyService/GetPolicy"
+	AccessPolicyService_ResetAntiPassback_FullMethodName  = "/accesscontrol.v1.AccessPolicyService/ResetAntiPassback"
+	AccessPolicyService_RecordAccessEvents_FullMethodName = "/accesscontrol.v1.AccessPolicyService/RecordAccessEvents"
+	AccessPolicyService_QueryAccessEvents_FullMethodName  = "/accesscontrol.v1.AccessPolicyService/QueryAccessEvents"
 )
 
 // AccessPolicyServiceClient is the client API for AccessPolicyService service.
@@ -39,6 +41,28 @@ type AccessPolicyServiceClient interface {
 	GetPolicy(ctx context.Context, in *GetPolicyRequest, opts ...grpc.CallOption) (*GetPolicyResponse, error)
 	// ResetAntiPassback resets anti-passback status for an employee.
 	ResetAntiPassback(ctx context.Context, in *ResetAntiPassbackRequest, opts ...grpc.CallOption) (*ResetAntiPassbackResponse, error)
+	// RecordAccessEvents durably records door decisions made at an edge node.
+	//
+	// An edge buffers every turnstile decision while it is offline and forwards
+	// them here on reconnect. Without this there is no central record of who was
+	// let through which door, and the edge's local copy is the only one - which
+	// is a single disk on a single machine, not an audit trail.
+	//
+	// Recording is idempotent on event_id, because replay after a partial failure
+	// is the normal case rather than the exception: an edge that fails partway
+	// through a batch must be able to retry it without double-counting.
+	RecordAccessEvents(ctx context.Context, in *RecordAccessEventsRequest, opts ...grpc.CallOption) (*RecordAccessEventsResponse, error)
+	// QueryAccessEvents reads the central access audit trail.
+	//
+	// Recording without reading is only half a control: the trail would exist and
+	// still be unanswerable, so "who entered which door, and when" would remain a
+	// question nobody could ask the system.
+	//
+	// Results are newest first and paginated by a keyset cursor over
+	// (occurred_unix, event_id) rather than an offset, so a replay arriving while
+	// an operator pages through history cannot shift rows between pages and make
+	// them skip or re-read an event.
+	QueryAccessEvents(ctx context.Context, in *QueryAccessEventsRequest, opts ...grpc.CallOption) (*QueryAccessEventsResponse, error)
 }
 
 type accessPolicyServiceClient struct {
@@ -89,6 +113,26 @@ func (c *accessPolicyServiceClient) ResetAntiPassback(ctx context.Context, in *R
 	return out, nil
 }
 
+func (c *accessPolicyServiceClient) RecordAccessEvents(ctx context.Context, in *RecordAccessEventsRequest, opts ...grpc.CallOption) (*RecordAccessEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordAccessEventsResponse)
+	err := c.cc.Invoke(ctx, AccessPolicyService_RecordAccessEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *accessPolicyServiceClient) QueryAccessEvents(ctx context.Context, in *QueryAccessEventsRequest, opts ...grpc.CallOption) (*QueryAccessEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryAccessEventsResponse)
+	err := c.cc.Invoke(ctx, AccessPolicyService_QueryAccessEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AccessPolicyServiceServer is the server API for AccessPolicyService service.
 // All implementations must embed UnimplementedAccessPolicyServiceServer
 // for forward compatibility.
@@ -103,6 +147,28 @@ type AccessPolicyServiceServer interface {
 	GetPolicy(context.Context, *GetPolicyRequest) (*GetPolicyResponse, error)
 	// ResetAntiPassback resets anti-passback status for an employee.
 	ResetAntiPassback(context.Context, *ResetAntiPassbackRequest) (*ResetAntiPassbackResponse, error)
+	// RecordAccessEvents durably records door decisions made at an edge node.
+	//
+	// An edge buffers every turnstile decision while it is offline and forwards
+	// them here on reconnect. Without this there is no central record of who was
+	// let through which door, and the edge's local copy is the only one - which
+	// is a single disk on a single machine, not an audit trail.
+	//
+	// Recording is idempotent on event_id, because replay after a partial failure
+	// is the normal case rather than the exception: an edge that fails partway
+	// through a batch must be able to retry it without double-counting.
+	RecordAccessEvents(context.Context, *RecordAccessEventsRequest) (*RecordAccessEventsResponse, error)
+	// QueryAccessEvents reads the central access audit trail.
+	//
+	// Recording without reading is only half a control: the trail would exist and
+	// still be unanswerable, so "who entered which door, and when" would remain a
+	// question nobody could ask the system.
+	//
+	// Results are newest first and paginated by a keyset cursor over
+	// (occurred_unix, event_id) rather than an offset, so a replay arriving while
+	// an operator pages through history cannot shift rows between pages and make
+	// them skip or re-read an event.
+	QueryAccessEvents(context.Context, *QueryAccessEventsRequest) (*QueryAccessEventsResponse, error)
 	mustEmbedUnimplementedAccessPolicyServiceServer()
 }
 
@@ -124,6 +190,12 @@ func (UnimplementedAccessPolicyServiceServer) GetPolicy(context.Context, *GetPol
 }
 func (UnimplementedAccessPolicyServiceServer) ResetAntiPassback(context.Context, *ResetAntiPassbackRequest) (*ResetAntiPassbackResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResetAntiPassback not implemented")
+}
+func (UnimplementedAccessPolicyServiceServer) RecordAccessEvents(context.Context, *RecordAccessEventsRequest) (*RecordAccessEventsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RecordAccessEvents not implemented")
+}
+func (UnimplementedAccessPolicyServiceServer) QueryAccessEvents(context.Context, *QueryAccessEventsRequest) (*QueryAccessEventsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method QueryAccessEvents not implemented")
 }
 func (UnimplementedAccessPolicyServiceServer) mustEmbedUnimplementedAccessPolicyServiceServer() {}
 func (UnimplementedAccessPolicyServiceServer) testEmbeddedByValue()                             {}
@@ -218,6 +290,42 @@ func _AccessPolicyService_ResetAntiPassback_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AccessPolicyService_RecordAccessEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordAccessEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AccessPolicyServiceServer).RecordAccessEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AccessPolicyService_RecordAccessEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AccessPolicyServiceServer).RecordAccessEvents(ctx, req.(*RecordAccessEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AccessPolicyService_QueryAccessEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryAccessEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AccessPolicyServiceServer).QueryAccessEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AccessPolicyService_QueryAccessEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AccessPolicyServiceServer).QueryAccessEvents(ctx, req.(*QueryAccessEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AccessPolicyService_ServiceDesc is the grpc.ServiceDesc for AccessPolicyService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -240,6 +348,14 @@ var AccessPolicyService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResetAntiPassback",
 			Handler:    _AccessPolicyService_ResetAntiPassback_Handler,
+		},
+		{
+			MethodName: "RecordAccessEvents",
+			Handler:    _AccessPolicyService_RecordAccessEvents_Handler,
+		},
+		{
+			MethodName: "QueryAccessEvents",
+			Handler:    _AccessPolicyService_QueryAccessEvents_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

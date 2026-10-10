@@ -79,6 +79,10 @@ services:
       # node could not reach the core. Without a volume it dies with the
       # container, which is precisely the record nobody else has.
       - EDGE_WAL_PATH=/data/edge-offline.wal
+      # How often this node flushes buffered door decisions to the core. Without
+      # a timer the WAL is written and never sent, so "who entered which door"
+      # only exists on this machine's disk.
+      - OFFLINE_REPLAY_INTERVAL=30s
     volumes:
       - edge-data:/data
     depends_on:

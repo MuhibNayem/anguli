@@ -53,6 +53,7 @@ should not be cited as such.
 | Circuit breaker and overload shedding | **Breaker had a race until this cycle** | The breaker published its open state before its cool-down timestamp, so a concurrent `Allow()` could read the timestamp as unset, compute the cool-down as `now − zero time` (decades), conclude it had elapsed, and admit a probe the cool-down existed to reject — parking the breaker in half-open with its probe slot spent. During an outage that sheds load and then lets one request per trip straight through. An unset timestamp now reads as *not* elapsed. `TestBreaker_NeverHalfOpensWithoutAnElapsedCoolDown` guards it; the same race was making `TestBreaker_ReopenRacesAllowReads` fail ~2% of runs, which made CI intermittently red. |
 | Biometric endpoint rate limiting | **Was absent entirely** | `/api/v1/doors/scan` performs 1:N identification and answers "who does this print belong to" across the whole gallery. Behind one shared API key and with no rate limit, any holder could enumerate a site's enrolled population — the one thing an access system must not disclose, and permanent if leaked, since templates cannot be reissued. Now bounded per caller, hashed so process memory holds no raw credential, and observable via `anguli_ratelimit_rejected_total`. |
 | Template key rotation | Production-ready | Zero-downtime rotation with no re-enrollment: a keyring loaded from the environment, and a `keyrotate` command that decrypts, re-encrypts and verifies every migrated template. Proven to leave the old key unable to read migrated records. |
+| Central access audit trail | **Did not exist, though every layer of it was "done"** | Replaying the edge's offline WAL **destroyed** it: `DrainOfflineEvents` truncated the durable log as part of the read, handed the events to a handler that discarded them, and the `access_events` table it was meant to feed was never written by any code path. Nothing triggered a replay at all, so during an outage every door decision was written to one edge machine's disk and never left. "Who entered which door, and when" had no central answer. Now: take → forward → acknowledge, with the WAL retired only after a confirmed forward — and retired by rewriting it from the live queue rather than truncating, because a door scan that lands mid-forward is still only on disk, and a truncate would destroy it while the node still held a copy in memory that looked fine until it restarted; a new `RecordAccessEvents` RPC; a real `access_audit_events` table keyed on a generated `event_id` so a retried batch cannot duplicate a door entry; and a background loop that flushes on a timer. The trail is also **readable**: `GET /api/v1/audit/access-events` (admin-only, rate limited), filtered by employee, zone, turnstile, time window and outcome, paginated by a keyset cursor so a replay landing mid-scan cannot make an operator skip events. Recording without a read path would have left the same gap in a new form — data no application can query answers none of the questions an audit trail exists to answer. |
 
 ## What is not production-ready
 
@@ -191,6 +192,29 @@ behaviour, and both are deployment and provisioning work rather than code this
 repository can decide on its own. It is listed here because it is the difference
 between "the limiter makes enumeration expensive" and "enumeration is
 attributable to a device".
+
+### The audit trail is only as durable as the edge disk that buffers it
+
+Central storage now receives every door decision, and the flush runs on a timer
+(`OFFLINE_REPLAY_INTERVAL`). But the path from decision to record still passes
+through **one edge node's disk**. If that node's storage fails during an outage,
+the events buffered on it are gone, and no replay can recover them because they
+never left. A second edge node does not help; the WAL is per-node, not shared.
+
+Bounding that needs host-owned infrastructure this library does not ship: an
+edge-to-edge or edge-to-central replication for the WAL, so a node's loss costs
+nothing, rather than a local disk holding the only copy until the next flush. The
+`Take` → `forward` → `Acknowledge` sequence makes the *flush* safe, and the
+replay loop makes it automatic; neither makes the *buffer* redundant.
+
+Two smaller consequences worth stating:
+
+- The trail records **decisions**, not the imagery behind them. A fingerprint
+  template is not re-derivable from an event row, so the log answers "who was
+  let through, when, and by what rule" but not "this print matched that finger".
+- `recorded_at_unix` is stamped when central storage receives the event, not when
+  the door opened. Both timestamps are stored, and `occurred_unix` is the one to
+  filter on, but an outage makes the gap between them large and visible.
 
 ### Interoperability is container-level only
 

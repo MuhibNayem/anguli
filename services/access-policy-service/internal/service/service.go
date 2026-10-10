@@ -1,7 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +14,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"finger-scanner/services/access-policy-service/internal/domain"
 	"finger-scanner/services/access-policy-service/internal/ports"
@@ -32,6 +37,10 @@ type PolicyUseCase interface {
 	Configure(ctx context.Context, rule *domain.PolicyRule) error
 	Get(ctx context.Context, zoneID string) (*domain.PolicyRule, error)
 	ResetAPB(ctx context.Context, empID, zoneID string) error
+	RecordAccessEvents(ctx context.Context, events []*domain.AccessAuditEvent) (recorded int, duplicates int, err error)
+	// QueryAccessEvents reads a page of the audit trail. pageToken is an opaque
+	// cursor; an empty nextPageToken means the result is exhausted.
+	QueryAccessEvents(ctx context.Context, filter domain.AccessEventFilter, pageToken string) (events []*domain.AccessAuditEvent, nextPageToken string, err error)
 }
 
 type policyService struct {
@@ -313,4 +322,108 @@ func (s *policyService) Get(ctx context.Context, zoneID string) (*domain.PolicyR
 
 func (s *policyService) ResetAPB(ctx context.Context, empID, zoneID string) error {
 	return s.repo.ResetAntiPassback(ctx, empID, zoneID)
+}
+
+// RecordAccessEvents durably stores door decisions reported by an edge node.
+//
+// Until this existed, the central access_events table was created by the schema
+// and then never written by any code path. Every turnstile decision was buffered
+// at the edge and destroyed when the buffer was replayed, so "who was let
+// through which door, and when" had no central answer at all. The edge's local
+// WAL was the only copy - one disk on one machine.
+func (s *policyService) RecordAccessEvents(
+	ctx context.Context, events []*domain.AccessAuditEvent,
+) (int, int, error) {
+	if len(events) == 0 {
+		return 0, 0, nil
+	}
+	recorded, duplicates, err := s.repo.RecordAccessEvents(ctx, events)
+	if err != nil {
+		return recorded, duplicates, err
+	}
+	s.logger.InfoContext(ctx, "access events recorded",
+		slog.Int("received", len(events)),
+		slog.Int("recorded", recorded),
+		slog.Int("duplicates", duplicates),
+	)
+	return recorded, duplicates, nil
+}
+
+// QueryAccessEvents reads the central access audit trail.
+//
+// The page token is base64-encoded JSON that a client can forge, so it is decoded
+// and validated here rather than trusted. A malformed or tampered token is an
+// error, not a silent reset to the first page: quietly returning page one would
+// look to an operator like the trail had no more entries, which is the worst
+// possible answer during an investigation.
+//
+// It is worth being precise about what that validation does and does not buy.
+// The token is not signed, and it does not need to be: it is a pagination
+// position, not a capability. Every request is authorised independently, and the
+// caller supplies its own filters on each call, so a forged token buys nothing a
+// caller could not get by varying its own query. What the checks prevent is a
+// cursor with no usable position - which would silently skip or repeat rows, or
+// crash the decode - and a mistyped token quietly reading as "start from the
+// top". Signing it would add a secret to rotate for no access-control gain.
+func (s *policyService) QueryAccessEvents(
+	ctx context.Context, filter domain.AccessEventFilter, pageToken string,
+) ([]*domain.AccessAuditEvent, string, error) {
+	if filter.FromUnix > 0 && filter.ToUnix > 0 && filter.ToUnix < filter.FromUnix {
+		return nil, "", status.Error(codes.InvalidArgument, "to_unix must not precede from_unix")
+	}
+
+	if pageToken != "" {
+		cursor, err := decodePageToken(pageToken)
+		if err != nil {
+			return nil, "", status.Errorf(codes.InvalidArgument, "invalid page_token: %v", err)
+		}
+		filter.CursorUnix = cursor.OccurredUnix
+		filter.CursorEventID = cursor.EventID
+	}
+
+	events, nextUnix, nextID, err := s.repo.QueryAccessEvents(ctx, filter)
+	if err != nil {
+		return nil, "", err
+	}
+	if nextID == "" {
+		return events, "", nil
+	}
+	next, err := encodePageToken(pageCursor{OccurredUnix: nextUnix, EventID: nextID})
+	if err != nil {
+		return nil, "", err
+	}
+	return events, next, nil
+}
+
+// pageCursor is the position a page token encodes.
+type pageCursor struct {
+	OccurredUnix int64  `json:"u"`
+	EventID      string `json:"e"`
+}
+
+func encodePageToken(c pageCursor) (string, error) {
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return "", fmt.Errorf("encode page token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func decodePageToken(token string) (pageCursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return pageCursor{}, fmt.Errorf("not valid base64")
+	}
+	var c pageCursor
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return pageCursor{}, fmt.Errorf("not a valid cursor")
+	}
+	if c.EventID == "" {
+		// A cursor with no event id has no position in the total order, so it
+		// cannot be used without silently skipping or repeating rows.
+		return pageCursor{}, fmt.Errorf("cursor has no event id")
+	}
+	return c, nil
 }

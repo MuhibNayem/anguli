@@ -16,10 +16,18 @@ type CachedEmployee struct {
 }
 
 // OfflineAuditLog represents an edge-buffered access event when WAN is disconnected.
+//
+// ZoneID is captured at decision time, not looked up later on replay. A door can
+// be moved to a different zone between the scan and the replay, and the audit
+// question is always "where was this person when they were admitted", so the
+// value has to be the one the edge actually made the decision against. The
+// field is JSON-encoded in the durable WAL, so WALs written before this field
+// existed still decode - their zone simply reads empty rather than failing.
 type OfflineAuditLog struct {
 	EventID       string
 	TurnstileID   string
 	EmployeeID    string
+	ZoneID        string
 	AccessGranted bool
 	Decision      string
 	TimestampUnix int64

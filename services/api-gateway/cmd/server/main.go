@@ -227,6 +227,12 @@ func main() {
 	mux.HandleFunc("/api/v1/doors/scan", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleDoorScan)))))
 	mux.HandleFunc("/api/v1/biometrics/revoke", overload(cors(authConfig.RequireAdmin(rateLimit(handler.HandleRevokeTemplate)))))
 	mux.HandleFunc("/api/v1/policies/reset-apb", overload(cors(authConfig.RequireAdmin(handler.HandleResetAPB))))
+	// The audit trail enumerates who entered which door and when, across the
+	// whole estate. A reader credential opens doors; it must not read everyone
+	// else's movement history, so this is admin-only like the other
+	// administrative routes. Rate limited because a caller can walk the trail
+	// page by page and enumerate the site's population.
+	mux.HandleFunc("/api/v1/audit/access-events", overload(cors(authConfig.RequireAdmin(rateLimit(handler.HandleQueryAccessEvents)))))
 
 	// Public Health and Status endpoints
 	mux.HandleFunc("/api/v1/doors/status", overload(cors(handler.HandleDoorStatus)))

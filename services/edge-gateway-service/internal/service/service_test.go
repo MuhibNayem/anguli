@@ -156,15 +156,27 @@ func TestEdgeService_H7_H8_DurableWALPersistence(t *testing.T) {
 		t.Errorf("expected 1 recovered event in cache2 after restart, got %d", cache2.GetOfflineEventCount(ctx))
 	}
 
-	// 3. Drain events and verify WAL file is truncated
-	drained, err := cache2.DrainOfflineEvents(ctx)
+	// 3. Taking the events must NOT truncate the WAL.
+	//
+	// It used to. Taking is only the first step of a replay - the events still
+	// have to reach central storage - so truncating here destroys the durable
+	// copy before anything else holds it. A replay that then failed, or whose
+	// results were discarded, lost the audit trail entirely.
+	drained, err := cache2.TakeOfflineEvents(ctx)
 	if err != nil || len(drained) != 1 {
-		t.Fatalf("failed to drain events: %v, count: %d", err, len(drained))
+		t.Fatalf("failed to take events: %v, count: %d", err, len(drained))
+	}
+	if fiTaken, _ := os.Stat(walPath); fiTaken.Size() == 0 {
+		t.Fatal("WAL was truncated by taking; the durable copy must survive until it is acknowledged")
 	}
 
-	fiDrained, _ := os.Stat(walPath)
-	if fiDrained.Size() != 0 {
-		t.Errorf("expected WAL file to be truncated to 0 bytes after drain, got %d", fiDrained.Size())
+	// 4. Acknowledging - which happens only once the events are stored
+	// upstream - is what discards it.
+	if err := cache2.AcknowledgeOfflineEvents(ctx); err != nil {
+		t.Fatalf("acknowledge: %v", err)
+	}
+	if fiAcked, _ := os.Stat(walPath); fiAcked.Size() != 0 {
+		t.Errorf("expected WAL file to be truncated to 0 bytes after acknowledge, got %d", fiAcked.Size())
 	}
 }
 

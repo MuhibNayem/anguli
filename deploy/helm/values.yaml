@@ -90,6 +90,12 @@ components:
     extraEnv:
       - name: EDGE_WAL_PATH
         value: /data/edge-offline.wal
+      # How often the node flushes buffered door decisions to the core. A
+      # non-positive or malformed value falls back to the default and logs a
+      # warning; it never disables the flush, because "no audit trail" is not a
+      # valid operating mode.
+      - name: OFFLINE_REPLAY_INTERVAL
+        value: 30s
   - name: api-gateway
     port: 8080
     replicas: 2

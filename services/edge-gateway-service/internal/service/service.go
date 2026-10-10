@@ -292,7 +292,16 @@ func (s *edgeService) ProcessScan(
 				now := time.Now().Unix()
 				lastEvent, _ := s.cache.GetLastPassEvent(ctx, matchedEmpID, zoneID)
 
-				if direction == 1 { // Entry attempt
+				// The offline APB branches below test for entry and exit explicitly. An
+				// unrecognised direction matches neither and would otherwise skip the rule
+				// entirely, so it is rejected before either branch is reached - here, where the
+				// WAN is already down and the cached path is the only one that will run.
+				if direction != directionEntry && direction != directionExit {
+					decision = 2 // ACCESS_DECISION_DENIED_INVALID_ZONE
+					isMatch = false
+					reason = fmt.Sprintf("Access denied (offline cached policy): unrecognised door direction %d; entry (1) or exit (2) is required", direction)
+					relayDuration = 0
+				} else if direction == directionEntry { // Entry attempt
 					if lastEvent != nil && lastEvent.Direction == 1 {
 						elapsed := now - lastEvent.Timestamp
 						if rule.AntiPassbackWindowSec == 0 || elapsed < int64(rule.AntiPassbackWindowSec) {
@@ -302,7 +311,7 @@ func (s *edgeService) ProcessScan(
 							relayDuration = 0
 						}
 					}
-				} else if direction == 2 { // Exit attempt
+				} else if direction == directionExit {
 					if lastEvent == nil || lastEvent.Direction != 1 {
 						decision = 3 // ACCESS_DECISION_DENIED_ANTI_PASSBACK
 						isMatch = false
@@ -414,6 +423,16 @@ func (s *edgeService) GetStatus(ctx context.Context, turnstileID string) (*domai
 		StartTimeUnix:        s.startupTime,
 	}, nil
 }
+
+// Door directions, mirroring accesscontrol.v1.DoorDirection. Named so a value
+// arriving outside the enum is compared against a defined set rather than a
+// magic number.
+const (
+	// directionEntry is a movement into a zone.
+	directionEntry int32 = 1
+	// directionExit is a movement out of a zone.
+	directionExit int32 = 2
+)
 
 func roleRank(role string) int {
 	switch role {

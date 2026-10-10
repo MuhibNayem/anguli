@@ -157,6 +157,12 @@ ranks at or above it:
 
 An empty `allowed_role` means the zone has no clearance requirement.
 
+Every turnstile scan must also name a direction: `DOOR_DIRECTION_ENTRY` (1) or
+`DOOR_DIRECTION_EXIT` (2). An unset or unrecognised direction is rejected —
+proto3 defaults an unset enum to zero, and the anti-passback evaluation reads
+entry and exit explicitly, so a missing direction used to skip the rule
+entirely and still record a pass event.
+
 An unrecognised role is **refused**, on both sides. Configuring a zone with
 `allowed_role: "ADMINISTRATOR"` — a plausible name that is not in the hierarchy
 — is rejected at configuration time, and if such a rule reaches evaluation

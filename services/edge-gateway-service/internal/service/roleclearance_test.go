@@ -158,3 +158,45 @@ func TestOfflineRefusesAnUnrecognisedEmployeeRole(t *testing.T) {
 		t.Fatalf("an unrecognised employee role (%q) was granted access to a zone requiring EMPLOYEE", "SUPERUSER")
 	}
 }
+
+// The offline path carries the same shape as the online one: anti-passback
+// branched on entry and exit explicitly, so an unrecognised direction matched
+// neither branch and the grant proceeded. On the edge this is the only path
+// that runs when the WAN is down.
+//
+// An unspecified direction is not hypothetical here either - proto3 defaults an
+// unset enum to zero, and the turnstile controller passes it straight through.
+func TestOfflineDeniesAnUnrecognisedDirection(t *testing.T) {
+	for _, direction := range []int32{0, 3, -1, 99} {
+		ctx := context.Background()
+		cache := memory.NewMemoryEdgeCache()
+		svc := service.NewEdgeService(cache, quietLogger())
+
+		rawPix, cyls := generateTestPrint(120, 120)
+		if err := cache.UpsertEmployee(ctx, &domain.CachedEmployee{
+			EmployeeID: "EMP-1", Role: "EMPLOYEE", IsActive: true, Cylinders: cyls,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cache.UpsertPolicyRule(ctx, &domain.PolicyRule{
+			ZoneID: "zone-test", AllowedRole: "EMPLOYEE",
+			RequireBiometrics: true, MinBiometricScore: 40.0,
+			EnforceAntiPassback: true, AntiPassbackWindowSec: 300,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := svc.ProcessScan(ctx, "turnstile-1", "zone-test", direction, "EMP-1", rawPix, 120, 120)
+		if err != nil {
+			t.Fatalf("ProcessScan(direction=%d): %v", direction, err)
+		}
+		if res.IsAccessGranted {
+			t.Fatalf("offline scan with direction %d was granted with anti-passback enforced; "+
+				"an unrecognised direction must not silently skip the rule", direction)
+		}
+		if res.RelayStrikeDurationMs != 0 {
+			t.Errorf("direction %d struck the relay (%dms) despite the denial",
+				direction, res.RelayStrikeDurationMs)
+		}
+	}
+}

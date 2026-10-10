@@ -2,6 +2,8 @@ package grpc
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -27,6 +29,18 @@ func NewServer(svc service.EdgeUseCase) *Server {
 func (s *Server) ProcessTurnstileScan(ctx context.Context, req *edgegatewayv1.ProcessTurnstileScanRequest) (*edgegatewayv1.ProcessTurnstileScanResponse, error) {
 	if req.TurnstileId == "" {
 		return nil, status.Error(codes.InvalidArgument, "turnstile_id is required")
+	}
+	// Direction is validated here as well as in the services below.
+	//
+	// proto3 defaults an unset enum field to DOOR_DIRECTION_UNSPECIFIED, which
+	// is zero, and zero is not a movement. Without this check the value passed
+	// straight through, and the anti-passback evaluation matched neither its
+	// entry branch nor its exit branch - skipping the rule and granting
+	// access. Rejecting at the boundary names the caller's mistake instead of
+	// turning it into a door decision.
+	if d := int32(req.Direction); d != 1 && d != 2 {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"direction must be DOOR_DIRECTION_ENTRY (1) or DOOR_DIRECTION_EXIT (2), got %d", d)
 	}
 
 	res, err := s.svc.ProcessScan(
@@ -57,12 +71,21 @@ func (s *Server) ProcessTurnstileScan(ctx context.Context, req *edgegatewayv1.Pr
 
 func (s *Server) SyncFacilityRoster(ctx context.Context, req *edgegatewayv1.SyncFacilityRosterRequest) (*edgegatewayv1.SyncFacilityRosterResponse, error) {
 	var items []*domain.CachedEmployee
+	// Items that carried template bytes which could not be decoded. They are
+	// still forwarded - dropping them would be worse, because a revocation is
+	// sent with no template bytes at all and must survive - but they reach the
+	// edge unable to be matched, so the loss is counted and reported rather
+	// than folded into a cheerful "synchronized successfully".
+	degraded := 0
 	for _, it := range req.Items {
 		var cyls []mcc.Cylinder
-		if len(it.MccCylinderBytes) > 0 {
+		hadTemplate := len(it.MccCylinderBytes) > 0
+		if hadTemplate {
 			c, err := mcc.DeserializeAll(it.MccCylinderBytes)
 			if err == nil {
 				cyls = c
+			} else {
+				degraded++
 			}
 		}
 
@@ -111,10 +134,22 @@ func (s *Server) SyncFacilityRoster(ctx context.Context, req *edgegatewayv1.Sync
 		_ = s.svc.SyncPolicies(ctx, policyRules)
 	}
 
+	message := "Local edge roster and policy rules synchronized successfully"
+	if degraded > 0 {
+		message = fmt.Sprintf(
+			"roster synchronized with %d of %d items carrying template bytes that could not be "+
+				"decoded; those employees are cached but cannot be verified at this node until the "+
+				"roster is re-synced", degraded, len(req.Items))
+		slog.Default().ErrorContext(ctx, "roster sync: template bytes could not be decoded",
+			slog.Int("degraded", degraded),
+			slog.Int("total", len(req.Items)),
+		)
+	}
+
 	return &edgegatewayv1.SyncFacilityRosterResponse{
 		Success:     true,
 		SyncedCount: synced,
-		Message:     "Local edge roster and policy rules synchronized successfully",
+		Message:     message,
 	}, nil
 }
 

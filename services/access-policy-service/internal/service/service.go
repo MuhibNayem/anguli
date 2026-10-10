@@ -23,6 +23,18 @@ import (
 
 var tracer = otel.Tracer("finger-scanner/services/access-policy-service")
 
+// Door directions, mirroring accesscontrol.v1.DoorDirection.
+//
+// Named here rather than taken from the generated proto so the service layer
+// does not depend on the wire types, and so a value that arrives outside the
+// enum is still compared against a defined set instead of a magic number.
+const (
+	// DirectionEntry is a movement into a zone.
+	DirectionEntry int32 = 1
+	// DirectionExit is a movement out of a zone.
+	DirectionExit int32 = 2
+)
+
 // EvaluationResult captures the outcome of an access control decision.
 type EvaluationResult struct {
 	Decision            int32
@@ -124,6 +136,40 @@ func (s *policyService) Evaluate(
 		),
 	)
 	defer span.End()
+
+	// 0. Direction must name a real movement.
+	//
+	// The anti-passback evaluation branched on `direction == 1` for entry and
+	// `direction == 2` for exit. Anything else matched neither branch, fell
+	// through to the grant, and recorded a pass event - so an unrecognised
+	// direction silently skipped the rule entirely.
+	//
+	// That is not hypothetical. proto3 defaults an unset enum field to zero and
+	// DOOR_DIRECTION_UNSPECIFIED is zero, so a caller that omits `direction`
+	// sends exactly the value that disables anti-passback.
+	//
+	// This is checked before anything else so that a malformed request cannot
+	// record a movement: a bogus pass event would also be what the next
+	// legitimate scan is judged against.
+	//
+	// The trade is not symmetric. Reading the direction wrong could strand
+	// someone inside a zone with no recorded exit; granting it bypasses a
+	// physical access control outright. So it denies.
+	if direction != DirectionEntry && direction != DirectionExit {
+		s.logger.WarnContext(ctx, "access denied: unrecognised door direction",
+			slog.String("employee_id", empID),
+			slog.String("zone_id", zoneID),
+			slog.Int("direction", int(direction)),
+		)
+		return &EvaluationResult{
+			Decision: 2, // ACCESS_DECISION_DENIED_INVALID_ZONE
+			// A malformed request is not the employee's fault, so the reason
+			// says what is wrong with it rather than blaming them.
+			IsGranted:           false,
+			Reason:              fmt.Sprintf("Unrecognised door direction %d; entry (1) or exit (2) is required", direction),
+			RelayOpenDurationMs: 0,
+		}, nil
+	}
 
 	// 1. Retrieve zone policy rule (H9: fail closed on unconfigured or unrecognized zones)
 	rule, err := s.repo.GetRule(ctx, zoneID)
@@ -267,7 +313,7 @@ func (s *policyService) evaluateAndRecord(
 	// zone, which is exactly what an ENTRY should be allowed to do. It is
 	// not a fault, so it must not become one.
 
-	if direction == 1 { // Entry attempt
+	if direction == DirectionEntry {
 		if lastEvent != nil && lastEvent.Direction == 1 {
 			elapsed := now - lastEvent.Timestamp
 			if rule.AntiPassbackWindowSec == 0 || elapsed < int64(rule.AntiPassbackWindowSec) {
@@ -284,7 +330,7 @@ func (s *policyService) evaluateAndRecord(
 				}, nil
 			}
 		}
-	} else if direction == 2 { // Exit attempt
+	} else if direction == DirectionExit {
 		// An employee cannot exit if there is no prior recorded entry, or if they have already exited
 		if lastEvent == nil || lastEvent.Direction != 1 {
 			s.logger.WarnContext(ctx, "access denied: anti-passback violation on exit",

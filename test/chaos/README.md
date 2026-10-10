@@ -109,28 +109,39 @@ stopped covering things. Use `-short` to skip the gate entirely.
 | `auth-credentials` | 10 header channels × 26 credential shapes (middleware pkg) |
 | `auth-cors` | origin reflection and wildcard+credentials (middleware pkg) |
 
-## Known defects
+## Fixed defects
 
-Chaos testing found real defects, not flaky tests. These are recorded in the
-ledger under `known-defects` and printed on **every run**, while the assertion
-is skipped so the build stays green.
+Chaos testing found real defects, not flaky tests. All three were tracked as
+skips via a `knownDefect(...)` helper so CI stayed green while the finding
+remained visible in the ledger, and **all three are now fixed** — the skips are
+gone and the assertions underneath run as hard `INV-BOUNDED` failures.
 
-A suite that is permanently red gets ignored, and the next genuine finding gets
-waved through with it. So: reproduce it, name it, track it, and keep CI usable.
+| ID | Defect | Impact | Status |
+|---|---|---|---|
+| `OSDP-001` | `osdp.Driver.SendCommand` blocked in `io.ReadFull` with no `ctx` check | A peripheral returning `(0, nil)` wedged `Poll` and `StrikeRelay` forever | **Fixed** |
+| `OSDP-002` | The bus lock was held across that blocking read | After one wedged transport every later OSDP call deadlocked; the door could not recover without a process restart | **Fixed** |
+| `OSDP-003` | `reader.PollEvent` / `StrikeRelay` inherited the above | The turnstile could not be commanded open or closed after a reader fault | **Fixed** |
 
-| ID | Defect | Impact |
-|---|---|---|
-| `OSDP-001` | `osdp.Driver.SendCommand` blocks in `io.ReadFull` (`driver.go:88`) with no `ctx` check | A peripheral that returns `(0, nil)` wedges `Poll` and `StrikeRelay` forever |
-| `OSDP-002` | `d.mu` is held across that blocking read (`driver.go:64`) | After one wedged transport every later OSDP call deadlocks; the door cannot recover without a process restart |
-| `OSDP-003` | `reader.PollEvent` / `StrikeRelay` inherit the above | The turnstile cannot be commanded open or closed after a reader fault |
+The fix, in `pkg/hardware/osdp/driver.go` and `pkg/hardware/reader/reader.go`:
 
-When a defect is fixed, delete its `knownDefect(...)` call — the assertion
-underneath will then run and pass. Do not delete the ledger entry without either
-fixing the code or removing the test.
+- **Every read and write is bounded by the caller's context.** Transports that
+  support deadlines (`net.Conn`, `os.File`) get `SetReadDeadline`/`SetWriteDeadline`
+  from the context; everything else runs behind a watchdog goroutine.
+- **The bus lock is a channel, not a `sync.Mutex`,** so a queued caller abandons
+  the wait when its own context expires instead of inheriting someone else's timeline.
+- **Status reporting is on a separate `RWMutex` that is never held across I/O.**
+  Previously `IsOnline()` took the same mutex as the blocking read, so a single
+  silent peripheral also froze the health check.
+- **An abandoned transaction poisons the transport.** OSDP is strict
+  request/response on a shared bus, so once a reply has been partially consumed
+  frame boundaries can no longer be trusted; later calls fail fast with
+  `ErrTransportPoisoned` rather than misparsing the stream.
+- **An unbounded caller still gets a 2s backstop** (`defaultIOTimeout`), so
+  forgetting a deadline cannot reintroduce OSDP-001 through the back door.
 
-The fix for all three is the same shape: give the transport a deadline
-(`SetReadDeadline` on the serial/USB handle) and/or make the read loop
-context-aware, so a wedged peripheral fails fast and releases the mutex.
+Regression coverage lives in `pkg/hardware/osdp/driver_resilience_test.go`
+(`TestOSDP001_*`, `TestOSDP002*`) and in the `security-osdp` / `security-reader`
+chaos dimensions.
 
 ## A note on the test corpus
 

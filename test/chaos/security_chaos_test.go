@@ -344,10 +344,12 @@ func TestChaos_OSDPFraming(t *testing.T) {
 
 	// Driver behaviour against a hostile transport.
 	//
-	// INV-BOUNDED: SendCommand must honour the context deadline. It currently
-	// calls io.ReadFull on the raw transport (driver.go:88) with no context
-	// check, so a peripheral that returns (0, nil) forever blocks indefinitely
-	// while holding d.mu - which also deadlocks every later OSDP call.
+	// INV-BOUNDED: SendCommand must honour the context deadline. This used to
+	// call io.ReadFull on the raw transport with no context check, so a
+	// peripheral returning (0, nil) blocked indefinitely while holding the bus
+	// lock - deadlocking every later OSDP call. That was tracked as OSDP-001
+	// and OSDP-002; the driver now bounds every read and write by the caller's
+	// context, so the assertions below are hard failures rather than skips.
 	t.Run("hostile-transport", func(t *testing.T) {
 		for _, mode := range []string{"silent", "garbage", "partial-frame", "closed"} {
 			record(dim, "transport-"+mode)
@@ -356,21 +358,28 @@ func TestChaos_OSDPFraming(t *testing.T) {
 			err, returned := pollBounded(d, 400*time.Millisecond)
 			observe(dim, "transport "+mode+" -> returned="+boolStr(returned)+" err="+boolStr(err != nil))
 			if !returned {
-				knownDefect(t, "OSDP-001", "osdp.Driver.SendCommand blocks in io.ReadFull "+
-					"(driver.go:88) without checking ctx, while holding d.mu from driver.go:64. "+
-					"A peripheral that returns (0, nil) wedges Poll forever on transport "+mode+".")
+				t.Errorf("[%s] INV-BOUNDED: Poll did not return within the deadline on transport %s "+
+					"(regression of OSDP-001: an unbounded read wedged the bus)", dim, mode)
 			}
 		}
 	})
 
 	// Relay strike must return promptly on a silent transport.
+	//
+	// The caller supplies its own deadline here, which is what a door controller
+	// should do. A separate sub-test below covers the unbounded case to prove
+	// the driver still imposes its own backstop.
 	t.Run("relay-bounds", func(t *testing.T) {
 		for _, ms := range []uint16{0, 1, 100, 2500, 5000, 60000, 65535} {
 			record(dim, "relay-"+itoa(float64(ms)))
 			rw := &hostileRW{mode: "silent"}
 			d := osdp.NewDriver(rw, 1)
 			done := make(chan error, 1)
-			go func() { done <- d.StrikeRelay(context.Background(), 0, ms) }()
+			go func() {
+				ctx, cancel := contextWithTimeout(400 * time.Millisecond)
+				defer cancel()
+				done <- d.StrikeRelay(ctx, 0, ms)
+			}()
 			var err error
 			returned := true
 			select {
@@ -380,13 +389,29 @@ func TestChaos_OSDPFraming(t *testing.T) {
 			}
 			observe(dim, "relay "+itoa(float64(ms))+"ms -> returned="+boolStr(returned))
 			if !returned {
-				knownDefect(t, "OSDP-001", "osdp.Driver.StrikeRelay("+itoa(float64(ms))+
-					"ms) blocks on a silent transport: the relay command cannot be sent or recalled.")
+				t.Errorf("[%s] INV-BOUNDED: StrikeRelay(%dms) did not return on a silent transport "+
+					"(regression of OSDP-001: the door could not be commanded open or closed)", dim, ms)
 			}
 			if returned && ms > 10000 && err == nil {
 				t.Errorf("[%s] INV-BOUNDED: relay strike of %dms was accepted without bound", dim, ms)
 			}
 			record(dim, "relay-out-of-range-"+itoa(float64(ms)))
+		}
+	})
+
+	// A caller that forgets its deadline must still be bounded by the driver.
+	t.Run("relay-unbounded-caller", func(t *testing.T) {
+		record(dim, "relay-unbounded-caller")
+		rw := &hostileRW{mode: "silent"}
+		d := osdp.NewDriver(rw, 1)
+		done := make(chan error, 1)
+		go func() { done <- d.StrikeRelay(context.Background(), 0, 2500) }()
+		select {
+		case <-done:
+			observe(dim, "unbounded caller still bounded by the driver backstop")
+		case <-time.After(8 * time.Second):
+			t.Errorf("[%s] INV-BOUNDED: StrikeRelay with context.Background() never returned; "+
+				"the driver must impose its own transaction deadline", dim)
 		}
 	})
 
@@ -412,9 +437,9 @@ func TestChaos_OSDPFraming(t *testing.T) {
 		case <-second:
 			observe(dim, "driver still responsive after a wedged transport")
 		case <-time.After(2 * time.Second):
-			knownDefect(t, "OSDP-002", "osdp.Driver.mu stays locked after a wedged transport "+
-				"(driver.go:64 held across the blocking read), so every subsequent OSDP operation "+
-				"is deadlocked and the door cannot recover without a process restart.")
+			t.Errorf("[%s] INV-BOUNDED: the driver stayed locked after a wedged transport "+
+				"(regression of OSDP-002: the bus lock was held across the blocking read, so "+
+				"every later OSDP call deadlocked and recovery needed a process restart)", dim)
 		}
 	})
 }
@@ -471,8 +496,9 @@ func TestChaos_TurnstileDriver(t *testing.T) {
 			}
 			observe(dim, "poll "+mode+" -> returned="+boolStr(returned)+" event="+boolStr(out.ev != nil))
 			if !returned {
-				knownDefect(t, "OSDP-003", "reader.PollEvent blocks past the context deadline on "+
-					"transport "+mode+": the turnstile reader wrapper inherits OSDP-001.")
+				t.Errorf("[%s] INV-BOUNDED: reader.PollEvent blocked past the context deadline on "+
+					"transport %s (regression of OSDP-003: the turnstile wrapper inherited the "+
+					"unbounded OSDP read)", dim, mode)
 			}
 			if out.ev != nil && strings.Contains(string(out.ev.Type), "GRANT") {
 				t.Errorf("[%s] INV-NOBYPASS: garbage transport produced a grant event", dim)
@@ -503,8 +529,8 @@ func TestChaos_TurnstileDriver(t *testing.T) {
 			}
 			observe(dim, "strike "+itoa(float64(d))+" -> returned="+boolStr(returned))
 			if !returned {
-				knownDefect(t, "OSDP-003", "reader.StrikeRelay("+d.String()+
-					") blocked on a silent transport; the door cannot be commanded open or closed.")
+				t.Errorf("[%s] INV-BOUNDED: reader.StrikeRelay(%v) blocked on a silent transport "+
+					"(regression of OSDP-003: the door could not be commanded open or closed)", dim, d)
 			}
 			if returned && d > time.Minute && err == nil {
 				t.Errorf("[%s] INV-BOUNDED: relay strike of %v accepted without bound", dim, d)
@@ -585,18 +611,14 @@ func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 // Known defects
 // ---------------------------------------------------------------------------
 
-// knownDefect records a confirmed defect and skips the assertion for now.
+// The knownDefect helper has been retired.
 //
-// Rationale: these are real, reproduced defects - not flaky tests. A suite that
-// is permanently red gets ignored, and the next genuine finding gets waved
-// through with it. So the finding is preserved in the observations ledger (and
-// printed on every run) while the build stays green.
+// It existed to track reproduced defects as skips so the suite could stay green
+// while a finding remained visible in the observations ledger. All three OSDP
+// findings it carried (OSDP-001, OSDP-002, OSDP-003) are now fixed in
+// pkg/hardware/osdp/driver.go and pkg/hardware/reader/reader.go, and the skips
+// that referenced them have been replaced with hard INV-BOUNDED assertions.
 //
-// When the underlying defect is fixed, delete the skip and the assertion
-// beneath it will run and pass. Never delete the ledger entry without fixing
-// the code or removing the test.
-func knownDefect(t *testing.T, id, detail string) {
-	t.Helper()
-	observe("known-defects", id+": "+detail)
-	t.Skipf("KNOWN DEFECT %s (chaos testing, tracked): %s", id, detail)
-}
+// The helper is kept out of the tree deliberately: a skip that silently outlives
+// its defect is worse than no test, because it looks like coverage. Reintroduce
+// it only together with the tracking discipline in test/chaos/README.md.

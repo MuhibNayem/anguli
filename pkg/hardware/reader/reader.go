@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"finger-scanner/pkg/hardware/osdp"
@@ -14,7 +13,7 @@ import (
 type ReaderEventType string
 
 const (
-	EventBadgePresented    ReaderEventType = "BADGE_PRESENTED"
+	EventBadgePresented     ReaderEventType = "BADGE_PRESENTED"
 	EventFingerprintScanned ReaderEventType = "FINGERPRINT_SCANNED"
 	EventOpticalTamper      ReaderEventType = "OPTICAL_TAMPER"
 )
@@ -42,7 +41,10 @@ type TurnstileHardwareDriver interface {
 type OSDPTurnstileDriver struct {
 	osdpDriver *osdp.Driver
 	logger     *slog.Logger
-	mu         sync.Mutex
+	// gate is a capacity-1 semaphore serialising physical-device operations.
+	// A channel rather than a sync.Mutex so a caller whose context expires stops
+	// waiting instead of parking behind an in-flight bus transaction.
+	gate chan struct{}
 }
 
 // NewOSDPTurnstileDriver wraps an OSDP driver for door turnstiles.
@@ -50,15 +52,32 @@ func NewOSDPTurnstileDriver(driver *osdp.Driver, logger *slog.Logger) *OSDPTurns
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &OSDPTurnstileDriver{
+	d := &OSDPTurnstileDriver{
 		osdpDriver: driver,
 		logger:     logger,
+		gate:       make(chan struct{}, 1),
+	}
+	d.gate <- struct{}{} // prime as "free"
+	return d
+}
+
+// acquire takes the device gate, abandoning the wait if ctx expires.
+func (d *OSDPTurnstileDriver) acquire(ctx context.Context) error {
+	select {
+	case <-d.gate:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for turnstile device: %w", ctx.Err())
 	}
 }
 
+func (d *OSDPTurnstileDriver) release() { d.gate <- struct{}{} }
+
 func (d *OSDPTurnstileDriver) PollEvent(ctx context.Context) (*HardwareEvent, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if err := d.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer d.release()
 
 	pkt, err := d.osdpDriver.Poll(ctx)
 	if err != nil {
@@ -87,16 +106,20 @@ func (d *OSDPTurnstileDriver) PollEvent(ctx context.Context) (*HardwareEvent, er
 }
 
 func (d *OSDPTurnstileDriver) StrikeRelay(ctx context.Context, duration time.Duration) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
 
 	ms := uint16(duration.Milliseconds())
 	return d.osdpDriver.StrikeRelay(ctx, 0x00, ms)
 }
 
 func (d *OSDPTurnstileDriver) SignalAccessGranted(ctx context.Context) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
 
 	// Green flash 2.5 seconds
 	return d.osdpDriver.SetLED(ctx, osdp.LEDCommand{
@@ -111,8 +134,10 @@ func (d *OSDPTurnstileDriver) SignalAccessGranted(ctx context.Context) error {
 }
 
 func (d *OSDPTurnstileDriver) SignalAccessDenied(ctx context.Context) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if err := d.acquire(ctx); err != nil {
+		return err
+	}
+	defer d.release()
 
 	// Red rapid flash 1.5 seconds
 	return d.osdpDriver.SetLED(ctx, osdp.LEDCommand{

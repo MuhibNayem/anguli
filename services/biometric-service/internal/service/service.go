@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +53,8 @@ type biometricService struct {
 	matcher   *mcc.Matcher
 	vault     *crypto.Vault
 	logger    *slog.Logger
+	// gallery caches decrypted templates for 1:N search. See gallery.go.
+	gallery *gallery
 }
 
 // NewBiometricService instantiates a production biometric service.
@@ -73,6 +74,7 @@ func NewBiometricService(
 		matcher:   mcc.NewMatcher(0.35, 60.0, logger),
 		vault:     vault,
 		logger:    logger,
+		gallery:   &gallery{},
 	}
 }
 
@@ -167,6 +169,11 @@ func (s *biometricService) Enroll(
 	if err := s.repo.Save(ctx, enrolled); err != nil {
 		return nil, fmt.Errorf("failed to persist enrolled template: %w", err)
 	}
+
+	// The new finger must be searchable immediately. Without this the cached
+	// gallery would keep serving a roster that no longer matches the database,
+	// and the employee would not be identifiable until the TTL expired.
+	s.gallery.invalidate()
 
 	s.logger.InfoContext(ctx, "fingerprint enrolled successfully",
 		slog.String("employee_id", empID),
@@ -269,45 +276,27 @@ func (s *biometricService) Identify(
 
 	probeTemplate := mcc.BuildTemplate("probe-search", probePoints)
 
-	all, err := s.repo.ListAll(ctx)
+	// 1:N search runs against a cached, pre-decrypted gallery rather than
+	// re-reading and re-decrypting every enrolment on every walk-up. See
+	// gallery.go for why this is not merely an optimisation.
+	entries, reloaded, err := s.gallery.snapshot(ctx, s.repo, s.vault, s.logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list templates: %w", err)
+		return nil, err
+	}
+	if reloaded {
+		span.SetAttributes(attribute.Int("gallery.templates", len(entries)))
 	}
 
-	var candidates []CandidateResult
-	for _, galleryItem := range all {
-		decryptedBytes, err := s.vault.DecryptTemplate(galleryItem.EncryptedPayload)
-		if err != nil {
-			continue
-		}
-		var galleryPayload domain.DecryptedTemplatePayload
-		if err := json.Unmarshal(decryptedBytes, &galleryPayload); err != nil {
-			continue
-		}
+	started := time.Now()
+	candidates := s.gallery.search(ctx, probeTemplate, probePoints, s.matcher, topK, s.logger)
 
-		galleryTemplate := &mcc.Template{
-			ID:        galleryItem.TemplateID,
-			Cylinders: galleryPayload.Cylinders,
-		}
-
-		res, err := s.matcher.Verify(ctx, probeTemplate, galleryTemplate)
-		if err == nil && res.IsMatch {
-			candidates = append(candidates, CandidateResult{
-				EmployeeID: galleryItem.EmployeeID,
-				Position:   galleryItem.Position,
-				Score:      res.Score,
-			})
-		}
-	}
-
-	// Sort candidates descending by match score
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Score > candidates[j].Score
-	})
-
-	if topK > 0 && len(candidates) > int(topK) {
-		candidates = candidates[:topK]
-	}
+	// Identification latency is the number the turnstile SLA is written
+	// against, and it grows with enrolment size. Logged on every search
+	// because "slow" here is a staffing or gallery-size problem, not a bug.
+	s.logger.InfoContext(ctx, "1:N search completed",
+		slog.Int("candidates", len(candidates)),
+		slog.Duration("elapsed", time.Since(started)),
+	)
 
 	return candidates, nil
 }

@@ -11,13 +11,13 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
 	accesscontrolv1 "finger-scanner/pkg/api/v1/accesscontrol"
 	edgegatewayv1 "finger-scanner/pkg/api/v1/edgegateway"
+	securitytls "finger-scanner/pkg/security/tls"
 	"finger-scanner/pkg/telemetry"
 	grpchandler "finger-scanner/services/edge-gateway-service/internal/adapters/grpc"
 	"finger-scanner/services/edge-gateway-service/internal/adapters/memory"
@@ -58,9 +58,26 @@ func main() {
 		policyAddr = os.Getenv("ACCESS_POLICY_SERVICE_ADDR")
 	}
 
+	// Transport security, read once and used for both roles this process plays:
+	// a TLS server for the gateway, and a TLS client toward the central policy
+	// service. Previously both directions were hardcoded insecure, so the fog node
+	// both served cleartext door decisions and sent cleartext employee identities
+	// to the core.
+	tlsCfg := securitytls.LoadConfigFromEnv()
+	logger.InfoContext(ctx, "grpc transport configured", slog.String("tls", tlsCfg.Describe()))
+
 	var policyClient accesscontrolv1.AccessPolicyServiceClient
 	if policyAddr != "" {
-		conn, err := grpc.NewClient(policyAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		clientOpt, err := securitytls.ClientOption(tlsCfg)
+		if err != nil {
+			// Refuse to start. Falling back to an insecure dial here would
+			// send employee identities in cleartext because of a certificate
+			// path typo, which is the exact failure TLS is meant to prevent.
+			logger.ErrorContext(ctx, "failed to configure central policy transport security",
+				slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		conn, err := grpc.NewClient(policyAddr, clientOpt)
 		if err == nil {
 			policyClient = accesscontrolv1.NewAccessPolicyServiceClient(conn)
 			defer conn.Close()
@@ -80,7 +97,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	transportOpt, err := securitytls.ServerOption(tlsCfg)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to configure gRPC transport security", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	grpcServer := grpc.NewServer(transportOpt)
 	edgegatewayv1.RegisterEdgeGatewayServiceServer(grpcServer, grpcServerHandler)
 
 	healthServer := health.NewServer()

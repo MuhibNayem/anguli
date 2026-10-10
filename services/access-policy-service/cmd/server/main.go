@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	accesscontrolv1 "finger-scanner/pkg/api/v1/accesscontrol"
+	securitytls "finger-scanner/pkg/security/tls"
 	"finger-scanner/pkg/store"
 	"finger-scanner/pkg/telemetry"
 	grpchandler "finger-scanner/services/access-policy-service/internal/adapters/grpc"
@@ -110,7 +111,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	// Transport security for every gRPC hop. A bare grpc.NewServer() serves
+	// cleartext: employee identities and door decisions were readable by
+	// anything on the pod network. Configuration comes from the environment,
+	// and a misconfigured TLS block is fatal rather than a silent downgrade.
+	tlsCfg := securitytls.LoadConfigFromEnv()
+	transportOpt, err := securitytls.ServerOption(tlsCfg)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to configure gRPC transport security", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	logger.InfoContext(ctx, "grpc transport configured", slog.String("tls", tlsCfg.Describe()))
+
+	grpcServer := grpc.NewServer(transportOpt)
 	accesscontrolv1.RegisterAccessPolicyServiceServer(grpcServer, grpcServerHandler)
 
 	healthServer := health.NewServer()

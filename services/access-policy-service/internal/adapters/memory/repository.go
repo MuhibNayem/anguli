@@ -22,6 +22,11 @@ type memoryPolicyRepo struct {
 	rules         map[string]*domain.PolicyRule
 	passEvents    map[string]*domain.PassEvent // key: employeeID:zoneID
 	employeeRoles map[string]string            // key: employeeID -> role
+
+	// passLocks serialises the anti-passback check-and-record per
+	// employee:zone. See WithPassEventLock.
+	passLocksMu sync.Mutex
+	passLocks   map[string]*sync.Mutex
 }
 
 // NewMemoryPolicyRepository creates a thread-safe repository with standard enterprise defaults.
@@ -30,6 +35,7 @@ func NewMemoryPolicyRepository() ports.PolicyRepository {
 		rules:         make(map[string]*domain.PolicyRule),
 		passEvents:    make(map[string]*domain.PassEvent),
 		employeeRoles: make(map[string]string),
+		passLocks:     make(map[string]*sync.Mutex),
 	}
 
 	// Seed standard default enterprise security zones
@@ -150,4 +156,37 @@ func (r *memoryPolicyRepo) ResetAntiPassback(ctx context.Context, employeeID, zo
 	key := fmt.Sprintf("%s:%s", employeeID, zoneID)
 	delete(r.passEvents, key)
 	return nil
+}
+
+// WithPassEventLock serialises the anti-passback check-and-record for one
+// employee:zone pair.
+//
+// This adapter is process-local by nature, so the mutex gives the same
+// guarantee the SQL adapter gets from a database advisory lock - for as long
+// as the state itself is process-local. It stops being sufficient the moment
+// two replicas each hold their own map, which is why the service defaults to
+// the SQL adapter and why the Helm chart refuses a multi-replica SQLite
+// deployment.
+//
+// fn returning an error releases the lock without side effects, which here is
+// automatic: unlike the SQL adapter there is no transaction to roll back.
+func (r *memoryPolicyRepo) WithPassEventLock(ctx context.Context, employeeID, zoneID string, fn func(context.Context) error) error {
+	if employeeID == "" || zoneID == "" {
+		return errors.New("memory: pass-event lock requires a non-empty employee and zone")
+	}
+
+	key := fmt.Sprintf("%s:%s", employeeID, zoneID)
+
+	r.passLocksMu.Lock()
+	mu, ok := r.passLocks[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		r.passLocks[key] = mu
+	}
+	r.passLocksMu.Unlock()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	return fn(ctx)
 }

@@ -6,12 +6,12 @@ import (
 	"log/slog"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	accesscontrolv1 "finger-scanner/pkg/api/v1/accesscontrol"
 	biometricsv1 "finger-scanner/pkg/api/v1/biometrics"
 	edgegatewayv1 "finger-scanner/pkg/api/v1/edgegateway"
+	securitytls "finger-scanner/pkg/security/tls"
 )
 
 // ServiceClients bundles the gRPC client connections.
@@ -29,6 +29,16 @@ type Config struct {
 	BiometricsAddr   string
 	AccessPolicyAddr string
 	EdgeGatewayAddr  string
+
+	// TLS controls transport security for every downstream channel.
+	//
+	// The zero value has Enabled false, which is plaintext. That is the right
+	// default for tests and single-host development, and it is deliberately
+	// NOT a silent fallback: when an operator sets Enabled, a missing or
+	// unreadable certificate fails the dial rather than quietly reverting to
+	// cleartext. Production entrypoints populate this from
+	// securitytls.LoadConfigFromEnv.
+	TLS securitytls.Config
 }
 
 // NewServiceClients establishes gRPC connections to downstream microservices.
@@ -40,14 +50,22 @@ func NewServiceClients(ctx context.Context, cfg Config, logger *slog.Logger) (*S
 		logger = slog.Default()
 	}
 
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	// Build the transport option from the TLS config rather than hardcoding
+	// insecure.NewCredentials(). This was the difference between the gateway
+	// encrypting employee identities and door decisions and not: the transport
+	// was plaintext on every channel regardless of what the operator asked
+	// for, because nothing here ever consulted the configuration.
+	credOpt, err := securitytls.ClientOption(cfg.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure downstream transport security: %w", err)
 	}
+	opts := []grpc.DialOption{credOpt}
 
 	logger.InfoContext(ctx, "dialing downstream microservices",
 		slog.String("biometrics_addr", cfg.BiometricsAddr),
 		slog.String("access_policy_addr", cfg.AccessPolicyAddr),
 		slog.String("edge_gateway_addr", cfg.EdgeGatewayAddr),
+		slog.String("transport", cfg.TLS.Describe()),
 	)
 
 	bioConn, err := grpc.NewClient(cfg.BiometricsAddr, opts...)

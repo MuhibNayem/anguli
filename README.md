@@ -64,7 +64,29 @@ starting a service with an empty one.
 | `STORAGE_DATA_DIR` | `data` | Where the SQLite file lives |
 | `MAX_CONCURRENT_REQUESTS` | `64` | Gateway admission ceiling |
 | `ADMISSION_GRACE_MS` | `250` | How long a request may queue before being shed |
+| `ENABLE_TLS` | `false` | Set `true` to encrypt all inter-service gRPC |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | — | Server key pair; required when TLS is on |
+| `TLS_CA_FILE` | — | CA bundle; required for mTLS, or for a private CA |
+| `TLS_SERVER_NAME` | — | SNI name the client validates the server against |
+| `TLS_REQUIRE_MTLS` | `false` | Set `true` to demand and verify a client certificate |
 | `PORT` | per-service | `50051` / `50052` / `50053` / `8080` |
+
+### Inter-service gRPC transport
+
+Every service-to-service gRPC hop — gateway to biometric, policy and edge, and
+edge to central policy — uses `pkg/security/tls`. Set `ENABLE_TLS=true` and
+supply a key pair to turn it on; `TLS_REQUIRE_MTLS=true` additionally demands a
+client certificate signed by `TLS_CA_FILE`.
+
+The transport is **fail-closed**. Once TLS is requested, a missing, unreadable
+or insufficiently configured certificate stops the process rather than
+downgrading to plaintext. An operator who sets `ENABLE_TLS=true` and mistypes a
+path gets a service that refuses to start, not one that quietly serves
+biometric templates and door decisions in cleartext.
+
+It is off by default because a single-host `docker compose up` has no
+certificate authority. That is a development convenience, not a production
+posture: in any real deployment this should be on.
 
 ### Storage and replica count
 
@@ -76,18 +98,53 @@ sqlite driver at `helm template` time, and names PostgreSQL as the fix.
 
 ### Known limitation: anti-passback is not atomic across replicas
 
-The policy service reads the last pass event and then records the new one as
-two separate calls. Two ENTRY swipes arriving concurrently at two different
-doors can both see "no prior entry" and both be granted.
+*Resolved.* The repository port now exposes `WithPassEventLock`, and the
+service runs its check and its commit inside it: a `pg_advisory_xact_lock` on
+Postgres, a keyed mutex plus transaction on SQLite. The read and the write are
+one atomic unit rather than two operations bracketed by a lock. Two
+simultaneous swipes now produce exactly one grant.
 
-Shared storage fixes *visibility* of the state; it does not make the decision
-*exclusive*. This is reachable only in a multi-replica deployment. The fix is
-a transactional compare-and-set at the repository port — read and insert inside
-one transaction, serializable on Postgres or guarded by a unique constraint.
-It is not implemented; see the `KNOWN LIMITATION` comment in
-`services/access-policy-service/internal/service/service.go`. A process-local
-mutex was deliberately not added, because it would close the single-replica
-case while leaving this one open and read like a completed fix.
+### Known limitation: 1:N search is still linear in enrolled fingers
+
+**Read this before sizing a gallery.** Walk-up 1:N identification remains
+O(number of enrolled fingers). The per-scan cost is dominated by the matcher,
+not by I/O.
+
+What was fixed: 1:N used to call `ListAll` and then decrypt, JSON-parse and
+match every enrolled record on the request path — tens of thousands of AES-GCM
+operations per swipe. It now runs against a cached, pre-decrypted gallery
+(`services/biometric-service/internal/service/gallery.go`), invalidated on local
+enrollment and refreshed on a 30s TTL, with candidates verified across a worker
+pool. Enrollment records are read once per TTL rather than once per scan.
+
+What that did **not** fix: the matcher itself. It compares every probe cylinder
+against every gallery cylinder for each candidate — about a thousand pair
+comparisons per candidate, times the whole gallery. CPU profiling puts 85% of
+search time in `Cylinder.SimilarityWithShift`. A worker pool divides that by
+the core count; it does not change the order.
+
+Measured on the development machine, warm cache, 32 minutiae per finger:
+
+| Enrolled fingers | Per walk-up |
+|---:|---:|
+| 50 | 83 ms |
+| 100 | 165 ms |
+| 200 | 319 ms |
+| 400 | 628 ms |
+| 800 | 1.24 s |
+| 1600 | 2.47 s |
+
+A 4x larger gallery costs 4.25x more — the growth is linear and independent of
+core count. **1:1 verification and 1:1 enrollment are unaffected and remain
+production-ready; 1:N walk-up identification is suitable for small deployments,
+not a Fortune 500 campus.** The 200 ms turnstile SLA is met at roughly 100
+enrolled fingers on this hardware.
+
+Reaching campus scale needs a change to the matcher, not more caching: a single
+global MCC bitstring compared by Hamming distance is O(words) per pair instead
+of O(cylinders²), at the cost of some rotation tolerance. That is not
+implemented. `TestSearchScalingIsReported` records the current growth rate so
+the day it changes, this section gets revisited.
 
 ### Why overload protection is on by default
 

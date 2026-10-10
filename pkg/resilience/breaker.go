@@ -97,8 +97,16 @@ type Breaker struct {
 	mu sync.Mutex
 	// failures holds timestamps of failures inside the current window.
 	failures []time.Time
-	// openedAt is when the breaker last transitioned to open.
-	openedAt time.Time
+	// openedAtUnixNano is when the breaker last transitioned to open, as Unix
+	// nanoseconds, and it is atomic rather than mu-guarded on purpose. The
+	// value is written once per transition to open but read by every rejected
+	// request: during an outage, when the dependency is down and the breaker is
+	// shedding load, that read happens at the full request rate. Guarding it
+	// with mu made all of those rejects queue behind one lock, so the path that
+	// exists specifically to shed work fast became the path that serialises -
+	// exactly when the process is least able to afford to wait. An atomic keeps
+	// the value race-free without putting it on the critical section.
+	openedAtUnixNano atomic.Int64
 	// halfOpenCalls counts probes admitted in the current half-open period.
 	halfOpenCalls int
 	// halfOpenSuccesses counts consecutive successful probes.
@@ -146,14 +154,17 @@ func (b *Breaker) Counters() (successes, failures, rejected, transitions uint64)
 	return b.successes.Load(), b.failuresSeen.Load(), b.rejected.Load(), b.stateChanges.Load()
 }
 
-// openedAtValue reads openedAt under the mutex. It must be used everywhere
-// outside open/close: Allow() runs on the hot path without the lock, and
-// reading the field directly there races with a concurrent Failure() tripping
-// the breaker.
+// openedAtValue reconstructs the transition timestamp from the atomic, without
+// taking mu: it runs on Allow()'s reject path, which must stay lock-free.
+// A stored zero means "never opened", and maps back to the zero time.Time so
+// the cool-down reads as long elapsed - the same answer the mutex-guarded
+// field gave for an unset value.
 func (b *Breaker) openedAtValue() time.Time {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.openedAt
+	n := b.openedAtUnixNano.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
 }
 
 // Allow reports whether a call may proceed, and why not when it may not.
@@ -259,7 +270,7 @@ func (b *Breaker) Failure(err error) {
 func (b *Breaker) open(err error) {
 	if b.transition(StateOpen) {
 		b.mu.Lock()
-		b.openedAt = b.now()
+		b.openedAtUnixNano.Store(b.now().UnixNano())
 		b.failures = nil
 		b.halfOpenCalls = 0
 		b.halfOpenSuccesses = 0
@@ -273,7 +284,7 @@ func (b *Breaker) close() {
 	if b.transition(StateClosed) {
 		b.mu.Lock()
 		b.failures = nil
-		b.openedAt = time.Time{}
+		b.openedAtUnixNano.Store(0)
 		b.halfOpenCalls = 0
 		b.halfOpenSuccesses = 0
 		b.mu.Unlock()

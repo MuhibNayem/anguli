@@ -18,6 +18,7 @@ import (
 
 	biometricsv1 "finger-scanner/pkg/api/v1/biometrics"
 	"finger-scanner/pkg/biometrics/crypto"
+	securitytls "finger-scanner/pkg/security/tls"
 	"finger-scanner/pkg/store"
 	"finger-scanner/pkg/telemetry"
 	grpchandler "finger-scanner/services/biometric-service/internal/adapters/grpc"
@@ -112,7 +113,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	// Transport security for the gRPC listener. This service handles biometric
+	// templates and identity-bearing records; a bare grpc.NewServer() served
+	// them in cleartext to anything on the pod network. Configuration comes
+	// from the environment and a misconfigured block is fatal, never a silent
+	// downgrade to plaintext.
+	tlsCfg := securitytls.LoadConfigFromEnv()
+	transportOpt, err := securitytls.ServerOption(tlsCfg)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to configure gRPC transport security", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	logger.InfoContext(ctx, "grpc transport configured", slog.String("tls", tlsCfg.Describe()))
+
+	grpcServer := grpc.NewServer(transportOpt)
 	biometricsv1.RegisterBiometricsServiceServer(grpcServer, grpcServerHandler)
 
 	// Health check service

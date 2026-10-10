@@ -30,4 +30,26 @@ type PolicyRepository interface {
 	ResetAntiPassback(ctx context.Context, employeeID, zoneID string) error
 	GetEmployeeRole(ctx context.Context, employeeID string) (string, error)
 	SetEmployeeRole(ctx context.Context, employeeID, role string) error
+
+	// WithPassEventLock runs fn while holding an exclusive lock scoped to one
+	// (employee, zone) pair, and commits only if fn returns nil.
+	//
+	// This exists because anti-passback is a read-modify-write decision and
+	// the two halves cannot be separated. Doing GetLastPassEvent and then
+	// RecordPassEvent as independent calls lets two turnstiles served by
+	// different replicas both observe "no prior entry" in the same instant and
+	// both admit the employee - which is precisely the event the rule exists
+	// to prevent. Sharing the state across replicas fixes visibility; it does
+	// not make the decision exclusive. Only a lock does that.
+	//
+	// The lock must be exclusive across PROCESSES, not merely across
+	// goroutines. A per-process mutex would serialise correctly on a single
+	// node and fail open on the multi-replica deployment this change exists to
+	// enable, which is the worst possible outcome: the code reads like the
+	// race is closed.
+	//
+	// fn receives a context that routes any repository call it makes through
+	// the same transaction as the lock, so the read and the write are one
+	// atomic unit rather than two operations bracketed by a lock.
+	WithPassEventLock(ctx context.Context, employeeID, zoneID string, fn func(ctx context.Context) error) error
 }

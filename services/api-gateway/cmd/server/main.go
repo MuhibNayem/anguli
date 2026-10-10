@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"finger-scanner/pkg/resilience"
+	securitytls "finger-scanner/pkg/security/tls"
 	"finger-scanner/pkg/telemetry"
 	"finger-scanner/services/api-gateway/internal/clients"
 	"finger-scanner/services/api-gateway/internal/handlers"
@@ -62,11 +63,20 @@ func main() {
 	logger := tel.Logger
 	logger.InfoContext(ctx, "starting api-gateway", slog.String("port", httpPort), slog.String("env", env))
 
-	// Connect to downstream gRPC services
+	// Connect to downstream gRPC services.
+	//
+	// Transport security comes from the environment so one build covers both
+	// a single-host plaintext development cluster and a mTLS production mesh.
+	// A misconfigured TLS block fails the dial rather than silently falling
+	// back to cleartext - see pkg/security/tls.
+	tlsCfg := securitytls.LoadConfigFromEnv()
+	logger.InfoContext(ctx, "downstream transport configured", slog.String("tls", tlsCfg.Describe()))
+
 	serviceClients, err := clients.NewServiceClients(ctx, clients.Config{
 		BiometricsAddr:   bioAddr,
 		AccessPolicyAddr: policyAddr,
 		EdgeGatewayAddr:  edgeAddr,
+		TLS:              tlsCfg,
 	}, logger)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to initialize gRPC clients", slog.String("error", err.Error()))

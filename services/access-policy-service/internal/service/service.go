@@ -146,73 +146,35 @@ func (s *policyService) Evaluate(
 
 	now := time.Now().Unix()
 
-	// 4. Symmetric Anti-Passback check (C3: prevent bypass via fake exit or duplicate entries)
+	// 4 + 5. Symmetric anti-passback check and pass-event commit.
 	//
-	// KNOWN LIMITATION - read-modify-write, not atomic.
+	// These two steps run together inside a lock scoped to this
+	// (employee, zone) pair. Doing them as separate calls let two turnstiles
+	// served by different replicas both observe "no prior entry" in the same
+	// instant and both admit the employee - the exact event the rule exists to
+	// prevent. Sharing state across replicas fixes visibility; holding the lock
+	// across the read AND the write is what makes the decision exclusive.
 	//
-	// This check and the RecordPassEvent at step 5 are two separate calls with
-	// no transaction between them. Two ENTRY swipes for the same employee at
-	// the same zone that arrive concurrently - the same person at Turnstile
-	// Lane 1 and Lane 2 in the same instant, which is precisely the case
-	// anti-passback exists to stop - can both observe "no prior entry" and
-	// both be granted.
-	//
-	// This is a TOCTOU race and it is NOT fixed by durable storage. Sharing
-	// state across replicas (what the sqlstore adapter does) is necessary but
-	// not sufficient; it makes the state visible, not the decision exclusive.
-	// It is reachable only in a multi-replica deployment, because a single
-	// process would have to interleave two goroutines at exactly this point.
-	//
-	// The fix is a transactional compare-and-set at the port level: take a
-	// per-(employee, zone) lock and do the read and the insert inside one
-	// transaction, serializable on Postgres or guarded by a unique constraint.
-	// That is deliberately NOT implemented here - a process-local mutex would
-	// close the single-replica case while leaving the multi-replica case open,
-	// which is the worst outcome: it reads like the problem is solved.
+	// The result is carried out of the closure rather than returned from it,
+	// so every denial path keeps its specific ACCESS_DECISION code and reason.
 	if rule.EnforceAntiPassback {
-		lastEvent, err := s.repo.GetLastPassEvent(ctx, empID, zoneID)
-		if err != nil && !errors.Is(err, ports.ErrNotFound) {
-			return nil, fmt.Errorf("failed to check anti-passback state: %w", err)
-		}
-		// A missing pass event means the employee has never been through this
-		// zone, which is exactly what an ENTRY should be allowed to do. It is
-		// not a fault, so it must not become one.
+		var result *EvaluationResult
+		var err error
 
-		if direction == 1 { // Entry attempt
-			if lastEvent != nil && lastEvent.Direction == 1 {
-				elapsed := now - lastEvent.Timestamp
-				if rule.AntiPassbackWindowSec == 0 || elapsed < int64(rule.AntiPassbackWindowSec) {
-					s.logger.WarnContext(ctx, "access denied: anti-passback violation on entry",
-						slog.String("employee_id", empID),
-						slog.Int64("elapsed_sec", elapsed),
-						slog.Int("window_sec", int(rule.AntiPassbackWindowSec)),
-					)
-					return &EvaluationResult{
-						Decision:            3, // ACCESS_DECISION_DENIED_ANTI_PASSBACK
-						IsGranted:           false,
-						Reason:              fmt.Sprintf("Anti-passback violation: entry already logged %d seconds ago (window %ds)", elapsed, rule.AntiPassbackWindowSec),
-						RelayOpenDurationMs: 0,
-					}, nil
-				}
-			}
-		} else if direction == 2 { // Exit attempt
-			// An employee cannot exit if there is no prior recorded entry, or if they have already exited
-			if lastEvent == nil || lastEvent.Direction != 1 {
-				s.logger.WarnContext(ctx, "access denied: anti-passback violation on exit",
-					slog.String("employee_id", empID),
-					slog.String("zone_id", zoneID),
-				)
-				return &EvaluationResult{
-					Decision:            3, // ACCESS_DECISION_DENIED_ANTI_PASSBACK
-					IsGranted:           false,
-					Reason:              "Anti-passback violation: cannot exit zone without prior recorded entry",
-					RelayOpenDurationMs: 0,
-				}, nil
-			}
+		lockErr := s.repo.WithPassEventLock(ctx, empID, zoneID, func(ctx context.Context) error {
+			result, err = s.evaluateAndRecord(ctx, rule, empID, zoneID, doorID, direction, now)
+			return err
+		})
+		if lockErr != nil {
+			return nil, lockErr
+		}
+		if result != nil {
+			return result, nil
 		}
 	}
 
-	// 5. Access Granted: Commit pass event to state repository (H11: Fail closed if audit state cannot be written)
+	// Anti-passback disabled: record the pass event without the lock, because
+	// there is no read to make exclusive.
 	event := &domain.PassEvent{
 		EmployeeID: empID,
 		ZoneID:     zoneID,
@@ -221,17 +183,7 @@ func (s *policyService) Evaluate(
 		Timestamp:  now,
 	}
 	if err := s.repo.RecordPassEvent(ctx, event); err != nil {
-		s.logger.ErrorContext(ctx, "failed to record pass event: failing closed for audit integrity",
-			slog.String("employee_id", empID),
-			slog.String("zone_id", zoneID),
-			slog.String("error", err.Error()),
-		)
-		return &EvaluationResult{
-			Decision:            0, // ACCESS_DECISION_UNSPECIFIED
-			IsGranted:           false,
-			Reason:              "Internal audit failure: unable to record passage state (failing closed)",
-			RelayOpenDurationMs: 0,
-		}, fmt.Errorf("failed to commit pass event audit record: %w", err)
+		return s.failClosedAudit(ctx, empID, zoneID, err)
 	}
 
 	s.logger.InfoContext(ctx, "access granted",
@@ -247,6 +199,108 @@ func (s *policyService) Evaluate(
 		Reason:              "Access granted by policy rule",
 		RelayOpenDurationMs: 2500, // 2.5 seconds unlock pulse
 	}, nil
+}
+
+// evaluateAndRecord applies the anti-passback rule to the last recorded event
+// and, if allowed, records the new one. It runs entirely inside the
+// repository's pass-event lock.
+//
+// It returns (nil, nil) to mean "allowed, record it", which is the only way
+// the caller gets back a non-nil result with a nil error: every denial carries
+// its own reason, and letting them collapse into a generic error would throw
+// away the decision code the edge gateway relays to the operator.
+func (s *policyService) evaluateAndRecord(
+	ctx context.Context,
+	rule *domain.PolicyRule,
+	empID, zoneID, doorID string,
+	direction int32,
+	now int64,
+) (*EvaluationResult, error) {
+	lastEvent, err := s.repo.GetLastPassEvent(ctx, empID, zoneID)
+	if err != nil && !errors.Is(err, ports.ErrNotFound) {
+		return nil, fmt.Errorf("failed to check anti-passback state: %w", err)
+	}
+	// A missing pass event means the employee has never been through this
+	// zone, which is exactly what an ENTRY should be allowed to do. It is
+	// not a fault, so it must not become one.
+
+	if direction == 1 { // Entry attempt
+		if lastEvent != nil && lastEvent.Direction == 1 {
+			elapsed := now - lastEvent.Timestamp
+			if rule.AntiPassbackWindowSec == 0 || elapsed < int64(rule.AntiPassbackWindowSec) {
+				s.logger.WarnContext(ctx, "access denied: anti-passback violation on entry",
+					slog.String("employee_id", empID),
+					slog.Int64("elapsed_sec", elapsed),
+					slog.Int("window_sec", int(rule.AntiPassbackWindowSec)),
+				)
+				return &EvaluationResult{
+					Decision:            3, // ACCESS_DECISION_DENIED_ANTI_PASSBACK
+					IsGranted:           false,
+					Reason:              fmt.Sprintf("Anti-passback violation: entry already logged %d seconds ago (window %ds)", elapsed, rule.AntiPassbackWindowSec),
+					RelayOpenDurationMs: 0,
+				}, nil
+			}
+		}
+	} else if direction == 2 { // Exit attempt
+		// An employee cannot exit if there is no prior recorded entry, or if they have already exited
+		if lastEvent == nil || lastEvent.Direction != 1 {
+			s.logger.WarnContext(ctx, "access denied: anti-passback violation on exit",
+				slog.String("employee_id", empID),
+				slog.String("zone_id", zoneID),
+			)
+			return &EvaluationResult{
+				Decision:            3, // ACCESS_DECISION_DENIED_ANTI_PASSBACK
+				IsGranted:           false,
+				Reason:              "Anti-passback violation: cannot exit zone without prior recorded entry",
+				RelayOpenDurationMs: 0,
+			}, nil
+		}
+	}
+
+	event := &domain.PassEvent{
+		EmployeeID: empID,
+		ZoneID:     zoneID,
+		DoorID:     doorID,
+		Direction:  direction,
+		Timestamp:  now,
+	}
+	if err := s.repo.RecordPassEvent(ctx, event); err != nil {
+		return s.failClosedAudit(ctx, empID, zoneID, err)
+	}
+
+	s.logger.InfoContext(ctx, "access granted",
+		slog.String("employee_id", empID),
+		slog.String("zone_id", zoneID),
+		slog.String("door_id", doorID),
+		slog.Int("direction", int(direction)),
+	)
+
+	return &EvaluationResult{
+		Decision:            1, // ACCESS_DECISION_GRANTED
+		IsGranted:           true,
+		Reason:              "Access granted by policy rule",
+		RelayOpenDurationMs: 2500,
+	}, nil
+}
+
+// failClosedAudit denies access when the pass event cannot be written.
+//
+// An access decision whose audit record is missing is not an access decision:
+// the system would have no way to answer who went where. Returning a granted
+// result alongside the error would let a caller that ignores the error wave
+// someone through with no record of it.
+func (s *policyService) failClosedAudit(ctx context.Context, empID, zoneID string, err error) (*EvaluationResult, error) {
+	s.logger.ErrorContext(ctx, "failed to record pass event: failing closed for audit integrity",
+		slog.String("employee_id", empID),
+		slog.String("zone_id", zoneID),
+		slog.String("error", err.Error()),
+	)
+	return &EvaluationResult{
+		Decision:            0, // ACCESS_DECISION_UNSPECIFIED
+		IsGranted:           false,
+		Reason:              "Internal audit failure: unable to record passage state (failing closed)",
+		RelayOpenDurationMs: 0,
+	}, fmt.Errorf("failed to commit pass event audit record: %w", err)
 }
 
 func (s *policyService) Configure(ctx context.Context, rule *domain.PolicyRule) error {

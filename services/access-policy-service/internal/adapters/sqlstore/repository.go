@@ -32,6 +32,9 @@ var ErrNotFound = ports.ErrNotFound
 // Repository is a durable PolicyRepository backed by SQL.
 type Repository struct {
 	st *store.Store
+	// locks serialises pass-event critical sections for non-Postgres drivers.
+	// See WithPassEventLock for why SQLite needs it and Postgres does not.
+	locks *keyedMutex
 }
 
 // New builds a Repository over an open, migrated store.
@@ -39,7 +42,7 @@ func New(st *store.Store) (*Repository, error) {
 	if st == nil {
 		return nil, errors.New("sqlstore: nil store")
 	}
-	return &Repository{st: st}, nil
+	return &Repository{st: st, locks: newKeyedMutex()}, nil
 }
 
 var _ ports.PolicyRepository = (*Repository)(nil)
@@ -49,7 +52,7 @@ func (r *Repository) SaveRule(ctx context.Context, rule *domain.PolicyRule) erro
 	if rule == nil || rule.ZoneID == "" {
 		return errors.New("cannot save a nil or zoneless policy rule")
 	}
-	_, err := r.st.DB().ExecContext(ctx, r.st.Rebind(`
+	_, err := r.q(ctx).ExecContext(ctx, r.st.Rebind(`
 		INSERT INTO policy_rules
 			(zone_id, allowed_role, require_biometrics, min_biometric_score,
 			 enforce_anti_passback, anti_passback_window_sec, updated_unix)
@@ -72,7 +75,7 @@ func (r *Repository) SaveRule(ctx context.Context, rule *domain.PolicyRule) erro
 // GetRule returns the rule for a zone, or ErrNotFound.
 func (r *Repository) GetRule(ctx context.Context, zoneID string) (*domain.PolicyRule, error) {
 	var out domain.PolicyRule
-	err := r.st.DB().QueryRowContext(ctx, r.st.Rebind(`
+	err := r.q(ctx).QueryRowContext(ctx, r.st.Rebind(`
 		SELECT zone_id, allowed_role, require_biometrics, min_biometric_score,
 		       enforce_anti_passback, anti_passback_window_sec
 		FROM policy_rules WHERE zone_id = ?`), zoneID).
@@ -98,7 +101,7 @@ func (r *Repository) RecordPassEvent(ctx context.Context, event *domain.PassEven
 	if ts == 0 {
 		ts = store.NowUnix()
 	}
-	_, err := r.st.DB().ExecContext(ctx, r.st.Rebind(`
+	_, err := r.q(ctx).ExecContext(ctx, r.st.Rebind(`
 		INSERT INTO pass_events (employee_id, zone_id, door_id, direction, occurred_unix)
 		VALUES (?, ?, ?, ?, ?)`),
 		event.EmployeeID, event.ZoneID, event.DoorID, event.Direction, ts)
@@ -111,7 +114,7 @@ func (r *Repository) RecordPassEvent(ctx context.Context, event *domain.PassEven
 // GetLastPassEvent returns the most recent pass for an employee at a zone.
 func (r *Repository) GetLastPassEvent(ctx context.Context, employeeID, zoneID string) (*domain.PassEvent, error) {
 	var out domain.PassEvent
-	err := r.st.DB().QueryRowContext(ctx, r.st.Rebind(`
+	err := r.q(ctx).QueryRowContext(ctx, r.st.Rebind(`
 		SELECT employee_id, zone_id, door_id, direction, occurred_unix
 		FROM pass_events
 		WHERE employee_id = ? AND zone_id = ?
@@ -135,7 +138,7 @@ func (r *Repository) GetLastPassEvent(ctx context.Context, employeeID, zoneID st
 // administrative override is the wrong trade in a system whose access log is
 // the record of who went where.
 func (r *Repository) ResetAntiPassback(ctx context.Context, employeeID, zoneID string) error {
-	_, err := r.st.DB().ExecContext(ctx, r.st.Rebind(`
+	_, err := r.q(ctx).ExecContext(ctx, r.st.Rebind(`
 		INSERT INTO pass_events (employee_id, zone_id, door_id, direction, occurred_unix)
 		VALUES (?, ?, '', 2, ?)`), employeeID, zoneID, store.NowUnix())
 	if err != nil {
@@ -147,7 +150,7 @@ func (r *Repository) ResetAntiPassback(ctx context.Context, employeeID, zoneID s
 // GetEmployeeRole returns an employee's role, or ErrNotFound.
 func (r *Repository) GetEmployeeRole(ctx context.Context, employeeID string) (string, error) {
 	var role string
-	err := r.st.DB().QueryRowContext(ctx, r.st.Rebind(
+	err := r.q(ctx).QueryRowContext(ctx, r.st.Rebind(
 		`SELECT role FROM employee_roles WHERE employee_id = ?`), employeeID).Scan(&role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("%w: no role for %s", ErrNotFound, employeeID)
@@ -163,7 +166,7 @@ func (r *Repository) SetEmployeeRole(ctx context.Context, employeeID, role strin
 	if employeeID == "" {
 		return errors.New("cannot set a role for an empty employee id")
 	}
-	_, err := r.st.DB().ExecContext(ctx, r.st.Rebind(`
+	_, err := r.q(ctx).ExecContext(ctx, r.st.Rebind(`
 		INSERT INTO employee_roles (employee_id, role, updated_unix)
 		VALUES (?, ?, ?)
 		ON CONFLICT (employee_id) DO UPDATE SET

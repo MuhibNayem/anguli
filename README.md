@@ -62,6 +62,8 @@ starting a service with an empty one.
 | `MASTER_KEY_PREVIOUS` | — | `kid:hex,kid:hex,…` kept for decryption only during a rotation |
 | `API_GATEWAY_KEY` | — (required) | Administrator credential for REST |
 | `READER_KEY` | — (required) | Credential a turnstile presents; must differ from `API_GATEWAY_KEY` |
+| `API_GATEWAY_KEY_PREVIOUS` | — (unset) | The credential being retired. Set only during a rotation; see below |
+| `READER_KEY_PREVIOUS` | — (unset) | The reader credential being retired |
 | `RATE_LIMIT_RPS` | `10` | Sustained biometric requests per second per caller |
 | `RATE_LIMIT_BURST` | `20` | Instantaneous burst per caller |
 | `FACILITY_ID` | `default` | Which site this deployment serves. Recorded in the database on first boot; the service **refuses to start** if the database already belongs to another facility. One deployment serves one site — see below. |
@@ -187,6 +189,41 @@ biometric templates and door decisions in cleartext.
 It is off by default because a single-host `docker compose up` has no
 certificate authority. That is a development convenience, not a production
 posture: in any real deployment this should be on.
+
+### Rotating a credential without locking the doors
+
+`API_GATEWAY_KEY` and `READER_KEY` are read once at startup, so a naive rotation
+is a building-wide lockout: you restart the gateway on the new key, and every
+door still holding the old one gets `401`. A turnstile is a physical device
+bolted to a wall — updating every reader takes real time, and the gateway cannot
+be told "the new key is live" until they are all done.
+
+So a retiring credential can be kept valid during the rollout:
+
+```sh
+# 1. Add the values being retired, alongside the new ones.
+export API_GATEWAY_KEY=$(openssl rand -hex 32)
+export READER_KEY=$(openssl rand -hex 32)
+export API_GATEWAY_KEY_PREVIOUS=<the old admin key>
+export READER_KEY_PREVIOUS=<the old reader key>
+
+# 2. Restart the gateway. Both generations now work; it logs a loud warning
+#    naming both variables for as long as the overlap is active.
+
+# 3. Roll the new credential out to turnstiles and clients.
+
+# 4. Unset the previous values and restart again. The old credential dies.
+```
+
+The overlap is refused if it would undo the privilege separation: a retiring
+admin key equal to the live reader key (or the reverse, or the two retiring
+keys being the same) would hand a turnstile administrative access for the
+duration of a maintenance task. Neither generation of *reader* credential is
+accepted on an admin route — verified against the running gateway, which answers
+`403` while both reader keys are live.
+
+Step 4 is the one that gets forgotten, and forgetting it is silent: the retired
+credential simply keeps working. That is what the startup warning is for.
 
 ### Offboarding: revoking a fingerprint
 

@@ -13,6 +13,21 @@
 # The chart never renders it into the Deployment itself - a DSN carries a
 # password, and a values literal ends up readable in `helm get values` and in
 # every release history that keeps a rendered manifest.
+#
+# Rotating API_GATEWAY_KEY or READER_KEY needs an overlap window. A turnstile is
+# bolted to a door, so updating every reader takes time, and the gateway cannot
+# simply switch: without an overlap it returns 401 to every door still holding
+# the retiring credential. Add these two keys to the Secret for the duration of
+# a rotation and remove them when it finishes:
+#
+#   --from-literal=API_GATEWAY_KEY_PREVIOUS="<the value being retired>"
+#   --from-literal=READER_KEY_PREVIOUS="<the value being retired>"
+#
+# They arrive through envFrom, so no values change is needed to use them. A
+# previous key left behind is a live credential nobody is tracking, so the
+# gateway logs a loud warning for as long as an overlap is active. Either may
+# also be set as a plain variable here, but a Secret is the better home: these
+# are credentials.
 
 replicaCount: 2
 

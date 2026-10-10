@@ -16,9 +16,54 @@ type AuthConfig struct {
 	ReaderKey    string
 	Logger       *slog.Logger
 
+	// PreviousMasterAPIKey and PreviousReaderKey are the credentials being
+	// retired. While set they are accepted as well as the current ones.
+	//
+	// They exist because the alternative locks the building. A turnstile is a
+	// physical device bolted to a door: rotating its credential means touching
+	// every reader, one at a time, and the gateway cannot be told "the new key
+	// is live" until they are all done. Without an overlap, restarting the
+	// gateway on a new key returns 401 to every door still holding the old one.
+	//
+	// They must be unset once the rollout is complete. A previous credential
+	// left behind is a live credential with no owner keeping track of it.
+	PreviousMasterAPIKey string
+	PreviousReaderKey    string
+
 	// Development reports whether insecure built-in credentials were accepted.
 	// It exists so the caller can log the fact once, loudly, at startup.
 	Development bool
+}
+
+// overlapActive reports whether a retiring credential is still accepted.
+func (a *AuthConfig) overlapActive() bool {
+	return a.PreviousMasterAPIKey != "" || a.PreviousReaderKey != ""
+}
+
+// credentialMatches compares a presented token against a secret in constant
+// time.
+//
+// An empty secret must never match, including when the token is also empty -
+// which is why the length check is first rather than relying on
+// ConstantTimeCompare's behaviour with empty inputs.
+func credentialMatches(token, secret string) bool {
+	if secret == "" || token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(secret)) == 1
+}
+
+// isAdmin reports whether a token carries administrative authority, accepting
+// either the current or the retiring admin credential.
+func (a *AuthConfig) isAdmin(token string) bool {
+	return credentialMatches(token, a.MasterAPIKey) ||
+		credentialMatches(token, a.PreviousMasterAPIKey)
+}
+
+// isReader reports whether a token is a reader credential, current or retiring.
+func (a *AuthConfig) isReader(token string) bool {
+	return credentialMatches(token, a.ReaderKey) ||
+		credentialMatches(token, a.PreviousReaderKey)
 }
 
 // ErrInsecureCredentials is returned when production has no credentials
@@ -75,12 +120,78 @@ func NewAuthConfig(logger *slog.Logger) (*AuthConfig, error) {
 				"gives every turnstile administrative access")
 	}
 
-	return &AuthConfig{
+	prevAPI := strings.TrimSpace(os.Getenv("API_GATEWAY_KEY_PREVIOUS"))
+	prevReader := strings.TrimSpace(os.Getenv("READER_KEY_PREVIOUS"))
+
+	// The overlap must not undo the privilege separation it exists to preserve.
+	// These are the combinations that would quietly turn a reader credential
+	// into an administrative one, which is the exact vulnerability the split
+	// above removed.
+	collisions := []struct {
+		what       string
+		a, b       string
+		aEnv, bEnv string
+	}{
+		{
+			what: "API_GATEWAY_KEY_PREVIOUS", a: prevAPI, b: readerKey,
+			aEnv: "API_GATEWAY_KEY_PREVIOUS", bEnv: "READER_KEY",
+		},
+		{
+			what: "READER_KEY_PREVIOUS", a: prevReader, b: apiKey,
+			aEnv: "READER_KEY_PREVIOUS", bEnv: "API_GATEWAY_KEY",
+		},
+		{
+			what: "READER_KEY_PREVIOUS", a: prevReader, b: prevAPI,
+			aEnv: "READER_KEY_PREVIOUS", bEnv: "API_GATEWAY_KEY_PREVIOUS",
+		},
+		{
+			what: "READER_KEY_PREVIOUS", a: prevReader, b: readerKey,
+			aEnv: "READER_KEY_PREVIOUS", bEnv: "READER_KEY",
+		},
+	}
+	for _, c := range collisions {
+		if c.a == "" {
+			continue
+		}
+		if c.a == c.b {
+			return nil, fmt.Errorf(
+				"gateway: %s must not equal %s; a retiring credential that matches a live "+
+					"one grants the privilege of the live credential, so a turnstile could "+
+					"authenticate as an administrator during the rotation window",
+				c.aEnv, c.bEnv)
+		}
+	}
+	if prevAPI != "" && prevAPI == apiKey {
+		return nil, errors.New(
+			"gateway: API_GATEWAY_KEY_PREVIOUS is identical to API_GATEWAY_KEY; " +
+				"nothing is being retired, so the overlap serves no purpose")
+	}
+
+	cfg := &AuthConfig{
 		MasterAPIKey: apiKey,
 		ReaderKey:    readerKey,
 		Logger:       logger,
 		Development:  isDev,
-	}, nil
+	}
+	if prevAPI != "" {
+		cfg.PreviousMasterAPIKey = prevAPI
+	}
+	if prevReader != "" {
+		cfg.PreviousReaderKey = prevReader
+	}
+
+	if cfg.overlapActive() && logger != nil {
+		// Loud, because the failure mode of forgetting is silent: the retiring
+		// credential keeps working for as long as nobody notices, and the reason
+		// it was retired is exactly the thing an operator needs to remember.
+		logger.Warn("CREDENTIAL ROTATION IN PROGRESS: the previous credential is still accepted. "+
+			"Unset API_GATEWAY_KEY_PREVIOUS and READER_KEY_PREVIOUS once every turnstile and "+
+			"client has been updated, otherwise a retired credential stays valid indefinitely.",
+			slog.Bool("previous_admin_key_accepted", cfg.PreviousMasterAPIKey != ""),
+			slog.Bool("previous_reader_key_accepted", cfg.PreviousReaderKey != ""))
+	}
+
+	return cfg, nil
 }
 
 // RequireAuth enforces API Key or Bearer Token authentication on protected
@@ -114,16 +225,13 @@ func (a *AuthConfig) require(next http.HandlerFunc, adminOnly bool) http.Handler
 			return
 		}
 
-		// Constant-time comparison to prevent timing attacks
-		validMaster := subtle.ConstantTimeCompare([]byte(token), []byte(a.MasterAPIKey)) == 1
-
-		if !validMaster {
+		// Constant-time comparison throughout, to prevent timing attacks.
+		if !a.isAdmin(token) {
 			// A reader credential is a real credential, but it is not an
-			// administrative one. Check it only when it would actually pass,
-			// so an admin-only route does not spend a comparison on it - and
-			// so the rejection reason is unambiguous.
-			validReader := !adminOnly &&
-				subtle.ConstantTimeCompare([]byte(token), []byte(a.ReaderKey)) == 1
+			// administrative one. Check it only when it would actually pass, so
+			// an admin-only route does not spend comparisons on it - and so the
+			// rejection reason is unambiguous.
+			validReader := !adminOnly && a.isReader(token)
 			if !validReader {
 				if a.Logger != nil {
 					a.Logger.WarnContext(r.Context(), "unauthorized access attempt",

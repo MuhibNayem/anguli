@@ -122,6 +122,15 @@ services:
       # turnstile the ability to enroll employees, revoke employees and reset
       # anti-passback. The gateway refuses to start if the two are equal.
       - READER_KEY=${READER_KEY:?READER_KEY must be set}
+      # Credential rotation. Leave these unset in steady state. Set them ONLY
+      # while a rotation is in flight: a turnstile is bolted to a door, so
+      # updating every reader takes time, and without an overlap the gateway
+      # returns 401 to every door still holding the retiring credential. Unset
+      # them once the rollout finishes - a previous key left behind is a live
+      # credential nobody is tracking. They are refused if either would collide
+      # with a live reader credential, which would hand a turnstile admin access.
+      - API_GATEWAY_KEY_PREVIOUS=${API_GATEWAY_KEY_PREVIOUS:-}
+      - READER_KEY_PREVIOUS=${READER_KEY_PREVIOUS:-}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       # Overload protection: bound concurrency so excess load is shed with a
       # 503 instead of queueing without limit.

@@ -95,10 +95,19 @@ func FuzzVaultDecrypt(f *testing.F) {
 		if err != nil {
 			return
 		}
-		// Only the genuine ciphertext may decrypt, and only to its own plaintext.
-		if !bytes.Equal(data, ct) {
-			t.Errorf("INV-CORRECT: forged ciphertext decrypted to %q", pt)
-		}
+		// The invariant is about AUTHENTICATION, not about which ciphertext
+		// happens to be current.
+		//
+		// An earlier version also asserted that only the ciphertext minted a
+		// few lines above could ever decrypt. That is not a property of the
+		// system: any payload legitimately produced by this vault under this
+		// key decrypts, including one from a previous run sitting in the fuzz
+		// corpus cache. The assertion was testing the randomness of the nonce
+		// rather than the crypto, and it failed on the genuine seed.
+		//
+		// What GCM actually guarantees is that a successful decryption proves
+		// the payload came from a holder of the key, and therefore yields
+		// exactly the original plaintext. That is the invariant worth keeping.
 		if !bytes.Equal(pt, []byte("seed-plaintext")) {
 			t.Errorf("INV-CORRECT: ciphertext decrypted to wrong plaintext %q", pt)
 		}

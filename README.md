@@ -66,6 +66,29 @@ starting a service with an empty one.
 | `ADMISSION_GRACE_MS` | `250` | How long a request may queue before being shed |
 | `PORT` | per-service | `50051` / `50052` / `50053` / `8080` |
 
+### Storage and replica count
+
+Anti-passback is shared state. With one SQLite file per pod, an ENTRY recorded
+by the pod serving one lane is invisible to the pod serving the next, and the
+second swipe is allowed — a silent authorisation bypass that no log line
+reports. The Helm chart therefore **rejects** more than one replica on the
+sqlite driver at `helm template` time, and names PostgreSQL as the fix.
+
+### Known limitation: anti-passback is not atomic across replicas
+
+The policy service reads the last pass event and then records the new one as
+two separate calls. Two ENTRY swipes arriving concurrently at two different
+doors can both see "no prior entry" and both be granted.
+
+Shared storage fixes *visibility* of the state; it does not make the decision
+*exclusive*. This is reachable only in a multi-replica deployment. The fix is
+a transactional compare-and-set at the repository port — read and insert inside
+one transaction, serializable on Postgres or guarded by a unique constraint.
+It is not implemented; see the `KNOWN LIMITATION` comment in
+`services/access-policy-service/internal/service/service.go`. A process-local
+mutex was deliberately not added, because it would close the single-replica
+case while leaving this one open and read like a completed fix.
+
 ### Why overload protection is on by default
 
 Measured on this platform, verify latency grew from 140 ms at one concurrent

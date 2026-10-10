@@ -11,7 +11,10 @@ import (
 )
 
 var (
-	ErrRuleNotFound = errors.New("policy rule not found for zone")
+	// ErrRuleNotFound is kept as a name callers may still reference; it is
+	// now an alias of ports.ErrNotFound so both adapters report absence the
+	// same way.
+	ErrRuleNotFound = ports.ErrNotFound
 )
 
 type memoryPolicyRepo struct {
@@ -124,7 +127,9 @@ func (r *memoryPolicyRepo) GetLastPassEvent(ctx context.Context, employeeID, zon
 	key := fmt.Sprintf("%s:%s", employeeID, zoneID)
 	event, exists := r.passEvents[key]
 	if !exists {
-		return nil, nil
+		// Not (nil, nil): "no previous pass" is a normal state, and the
+		// service must be able to tell it apart from a storage fault.
+		return nil, ports.ErrNotFound
 	}
 	return event, nil
 }

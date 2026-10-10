@@ -84,8 +84,8 @@ func main() {
 
 	// Durable storage. SQLite is the default so a single node needs no extra
 	// service; set STORAGE_DRIVER=postgres for a shared multi-instance store.
-	// The in-memory adapter remains available for tests and local experiments
-	// via STORAGE_DRIVER=memory.
+	// Only sqlite and postgres are accepted here - store.Open rejects anything
+	// else with a fatal error, so "memory" is a crash loop, not a fallback.
 	st, err := store.Open(ctx, store.FromEnv())
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to open storage", slog.String("error", err.Error()))

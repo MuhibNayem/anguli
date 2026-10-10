@@ -74,7 +74,6 @@ func main() {
 	}
 	defer serviceClients.Close()
 
-	handler := handlers.NewGatewayHandler(serviceClients, logger)
 	authConfig := middleware.NewAuthConfig(logger)
 
 	// Overload protection: bounded concurrency with load shedding. Without a
@@ -98,6 +97,11 @@ func main() {
 		logger.ErrorContext(ctx, "invalid circuit breaker configuration", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
+
+	// The breakers are only useful if the requests actually travel through
+	// them. Constructing them here and handing them to the handler is what
+	// turns them from an inert metrics source into protection.
+	handler := handlers.NewGatewayHandlerWithBreakers(serviceClients, breakers, logger)
 	go func() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()

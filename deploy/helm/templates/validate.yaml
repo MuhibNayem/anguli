@@ -26,3 +26,39 @@ discovering it on a door that will not open.
 {{- if not .Values.components }}
 {{- fail "components must not be empty; the chart renders one Deployment and Service per entry" }}
 {{- end }}
+
+{{/*
+Shared-state guard.
+
+Enrollment templates and anti-passback events are correctness data, not cache.
+A replica that cannot see a peer's write will let a second swipe through a
+door, so "the pods each have their own database" is a security failure dressed
+as a storage choice.
+
+SQLite puts one file per pod, so more than one replica on SQLite is silently
+wrong: every request succeeds, every test passes against one pod, and the
+defect only appears when a swipe is routed to the other replica. There is no
+log line that reports it, which is why it has to be rejected at template time.
+
+This reads autoscaling.maxReplicas rather than replicas because the deployment
+template drops `replicas` entirely when autoscaling is enabled - checking only
+the static field would pass a chart that scales to ten.
+
+Only components with persistence: true are checked. The api-gateway and edge
+services hold no state, so a driver means nothing there and guarding them
+would block a legitimate stateless scale-out.
+*/}}
+{{- range $c := .Values.components }}
+{{- if $c.persistence }}
+{{- $driver := "sqlite" }}
+{{- with $c.storageDriver }}{{ $driver = . }}{{ end }}
+{{- if not (has $driver (list "sqlite" "postgres")) }}
+{{- fail (printf "component %q declares storageDriver %q; only sqlite and postgres are valid. 'memory' is for local experiments only and must never be deployed." $c.name $driver) }}
+{{- end }}
+{{- $replicas := int (default 1 $c.replicas) }}
+{{- if $.Values.autoscaling.enabled }}{{ $replicas = int $.Values.autoscaling.maxReplicas }}{{ end }}
+{{- if and (gt $replicas 1) (eq $driver "sqlite") }}
+{{- fail (printf "component %q is configured for %d replicas on the sqlite driver. SQLite gives each pod its own file, so anti-passback and enrollment state would NOT be shared across replicas. Set storageDriver: postgres, or reduce replicas to 1." $c.name $replicas) }}
+{{- end }}
+{{- end }}
+{{- end }}

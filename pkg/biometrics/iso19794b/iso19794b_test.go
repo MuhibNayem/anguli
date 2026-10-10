@@ -459,7 +459,6 @@ func TestBuild_RejectsBadInput(t *testing.T) {
 		"finger quality 101":  {100, 100, 0, 0, 101, good},
 		"x over 14 bits":      {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: maxCoord + 1, Y: 1, Quality: 10}}},
 		"y over 14 bits":      {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: maxCoord + 1, Quality: 10}}},
-		"minutia quality 0":   {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 0}}},
 		"minutia quality 101": {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 101}}},
 		"reserved type 3":     {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 3, X: 1, Y: 1, Quality: 10}}},
 		"too many minutiae":   {100, 100, 0, 0, 100, sample(256)},
@@ -498,5 +497,76 @@ func TestParse_NeverPanicsOnArbitraryBytes(t *testing.T) {
 			}()
 			_, _ = Parse(b)
 		}()
+	}
+}
+
+// Clause 7.4.2.4 permits the zero sentinel, but only when the whole record
+// uses it: "Systems that do not provide image quality assessment shall set all
+// values of the Quality data field group to zero." Rejecting zero outright
+// would refuse a legitimate no-quality record from a reader that does not
+// score minutiae; accepting it per-minutia would write a record claiming some
+// minutiae were measured and some were not.
+func TestQualitySentinelIsAllOrNothing(t *testing.T) {
+	zero := []MinutiaFormat{
+		{Type: 1, X: 10, Y: 10, Quality: 0},
+		{Type: 2, X: 20, Y: 20, Quality: 0},
+	}
+	real := []MinutiaFormat{
+		{Type: 1, X: 10, Y: 10, Quality: 50},
+		{Type: 2, X: 20, Y: 20, Quality: 90},
+	}
+
+	for name, set := range map[string][]MinutiaFormat{"all zero": zero, "all real": real} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Build(64, 64, 0, 0, 90, set); err != nil {
+				t.Fatalf("Build rejected a valid record: %v", err)
+			}
+		})
+	}
+
+	t.Run("mixed", func(t *testing.T) {
+		mixed := []MinutiaFormat{
+			{Type: 1, X: 10, Y: 10, Quality: 0},
+			{Type: 1, X: 30, Y: 30, Quality: 50},
+		}
+		if _, err := Build(64, 64, 0, 0, 90, mixed); !errors.Is(err, ErrBadQuality) {
+			t.Fatalf("err = %v; want ErrBadQuality", err)
+		}
+	})
+
+	// An all-zero record must survive a round trip, not just serialisation.
+	raw, err := Build(64, 64, 0, 0, 90, zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for i, m := range got.Views[0].Minutiae {
+		if m.Quality != 0 {
+			t.Errorf("minutia %d quality = %d; want the zero sentinel preserved", i, m.Quality)
+		}
+	}
+}
+
+// Orientation just below a full turn rounds to 256, which does not fit a uint8.
+func TestOrientationNearFullTurnDoesNotOverflowTheByte(t *testing.T) {
+	for _, ang := range []float64{2*math.Pi - 1e-12, 2*math.Pi - 1e-15, math.Nextafter(2*math.Pi, 0)} {
+		raw, err := Build(64, 64, 0, 0, 90, []MinutiaFormat{
+			{Type: 1, X: 10, Y: 10, Quality: 50, Orientation: ang},
+		})
+		if err != nil {
+			t.Fatalf("Build(%v): %v", ang, err)
+		}
+		got, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse(%v): %v", ang, err)
+		}
+		// Wrapping to 0 is correct: 256 steps IS one turn, so 256 and 0 are the
+		// same direction. What matters is that it is defined, not garbage.
+		if o := got.Views[0].Minutiae[0].Orientation; o < 0 || o >= 2*math.Pi {
+			t.Errorf("orientation %v encoded to %v", ang, o)
+		}
 	}
 }

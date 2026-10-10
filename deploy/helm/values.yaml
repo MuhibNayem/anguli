@@ -5,7 +5,13 @@
 
 #   kubectl create secret generic anguli-secrets \
 #     --from-literal=MASTER_KEY="$(openssl rand -hex 32)" \
-#     --from-literal=API_GATEWAY_KEY="$(openssl rand -hex 32)"
+#     --from-literal=API_GATEWAY_KEY="$(openssl rand -hex 32)" \
+#     --from-literal=STORAGE_DSN="postgres://anguli:...@host:5432/anguli?sslmode=require"
+#
+# STORAGE_DSN is required whenever a component sets storageDriver: postgres.
+# The chart never renders it into the Deployment itself - a DSN carries a
+# password, and a values literal ends up readable in `helm get values` and in
+# every release history that keeps a rendered manifest.
 
 replicaCount: 2
 
@@ -58,11 +64,18 @@ components:
     replicas: 1
     healthScheme: grpc
     persistence: true
+    storageDriver: sqlite
+  # Two replicas means anti-passback state must be shared: with a per-pod
+  # database an ENTRY recorded by the pod serving one lane is invisible to the
+  # pod serving the next, and the second swipe is allowed through. The service
+  # therefore requires PostgreSQL at replica counts above one - see the
+  # storageDriver field and the guard in templates/validate.yaml.
   - name: policy
     port: 50052
     replicas: 2
     healthScheme: grpc
-    persistence: false
+    persistence: true
+    storageDriver: postgres
   - name: edge
     port: 50053
     replicas: 1

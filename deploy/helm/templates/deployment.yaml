@@ -80,6 +80,22 @@ spec:
             - name: POLICY_ADDR
               value: {{ index $addr "policy" | quote }}
             {{- end }}
+            {{/*
+            Storage wiring. STORAGE_DATA_DIR is set whenever the component has a
+            /data volume, not only when a driver is named: pkg/store defaults an
+            unset driver to SQLite, and a SQLite file with an unset directory
+            lands in the container's working directory instead of the volume,
+            so it silently disappears on restart. STORAGE_DSN is deliberately
+            NOT set here - it carries a password and belongs in the Secret.
+            */}}
+            {{- with $c.storageDriver }}
+            - name: STORAGE_DRIVER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if $c.persistence }}
+            - name: STORAGE_DATA_DIR
+              value: /data
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ $root.Values.existingSecret.name }}

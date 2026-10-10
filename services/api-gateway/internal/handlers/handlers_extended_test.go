@@ -76,10 +76,14 @@ type stubEdge struct {
 	statusErr  error
 
 	lastScan *edgegatewayv1.ProcessTurnstileScanRequest
+	// scanCalls counts every scan that reached the downstream service, so a
+	// test can assert a request was stopped before it ever left the gateway.
+	scanCalls int
 }
 
 func (s *stubEdge) ProcessTurnstileScan(_ context.Context, in *edgegatewayv1.ProcessTurnstileScanRequest, _ ...grpc.CallOption) (*edgegatewayv1.ProcessTurnstileScanResponse, error) {
 	s.lastScan = in
+	s.scanCalls++
 	if s.scanErr != nil {
 		return nil, s.scanErr
 	}
@@ -371,12 +375,48 @@ func TestHandleDoorScan_C5EveryClaimPathIsGated(t *testing.T) {
 	}
 }
 
-func TestHandleDoorScan_BadgeCredentialIsTrusted(t *testing.T) {
+// A credential_card_id arrives in the request BODY, which the caller controls,
+// so it is an identity CLAIM and never proof that the request came from real
+// hardware. Counting it as a channel credential let anyone post
+// {"employee_id":"...","credential_card_id":"anything"} and skip the C5 gate
+// entirely, which is the exact control that stops a spoofed 1:1 unlock.
+//
+// The previous version of this test asserted the opposite - that a body badge
+// alone is trusted - and therefore passed against vulnerable code.
+func TestHandleDoorScan_BodySuppliedBadgeIsNotACredential(t *testing.T) {
+	bodies := map[string]string{
+		"badge alone":         `{"turnstile_id":"t","zone_id":"z","employee_id":"EMP-VICTIM","credential_card_id":"BADGE-77"}`,
+		"whitespace badge":    `{"employee_id":"EMP-VICTIM","credential_card_id":"   "}`,
+		"badge with badge id": `{"employee_id":"EMP-VICTIM","credential_card_id":"B","turnstile_id":"t","zone_id":"z"}`,
+		"door and badge":      `{"employee_id":"EMP-VICTIM","credential_card_id":"B","door_id":"front"}`,
+		"loud badge value":    `{"employee_id":"EMP-VICTIM","credential_card_id":"!@#$%^&*"}`,
+		"badge plus noise":    `{"employee_id":"EMP-VICTIM","credential_card_id":"B","noise_factor":5}`,
+	}
+	for name, body := range bodies {
+		t.Run("rejects "+name, func(t *testing.T) {
+			f := newFixture()
+			rec := do(t, f.h.HandleDoorScan, http.MethodPost, "/scan", body, nil)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("status = %d; want 403 for %s - a body field cannot authenticate the channel (body=%s)",
+					rec.Code, name, rec.Body.String())
+			}
+			if f.edge.scanCalls != 0 {
+				t.Errorf("the edge gateway was called %d time(s); the gate should have stopped the request", f.edge.scanCalls)
+			}
+		})
+	}
+}
+
+// The channel header is what makes the body-supplied badge meaningful, so the
+// legitimate combination must still work.
+func TestHandleDoorScan_ReaderHeaderPlusBodyBadgeIsAccepted(t *testing.T) {
 	f := newFixture()
 	rec := do(t, f.h.HandleDoorScan, http.MethodPost, "/scan",
-		`{"employee_id":"EMP-1","credential_card_id":"BADGE-77"}`, nil)
+		`{"employee_id":"EMP-1","credential_card_id":"BADGE-77","turnstile_id":"t","zone_id":"z"}`,
+		map[string]string{"X-Reader-ID": "reader-07"})
 	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d; a physical badge is a trusted credential", rec.Code)
+		t.Errorf("status = %d; an authenticated reader channel carrying a badge should be accepted: %s",
+			rec.Code, rec.Body.String())
 	}
 }
 

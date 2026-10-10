@@ -69,6 +69,45 @@ CREATE TABLE IF NOT EXISTS access_events (
 		fmt.Sprintf(`
 CREATE INDEX IF NOT EXISTS idx_access_events_time
     ON access_events (occurred_unix)`),
+
+		// Access-policy state. These exist so anti-passback survives a restart
+		// AND is shared between replicas: an in-memory rule set means an
+		// employee can be marked "already entered" at one door and "never
+		// entered" at the one next to it.
+		fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS policy_rules (
+    zone_id                  TEXT    PRIMARY KEY,
+    allowed_role             TEXT    NOT NULL DEFAULT '',
+    require_biometrics       BOOLEAN NOT NULL DEFAULT %s,
+    min_biometric_score      REAL    NOT NULL DEFAULT 0,
+    enforce_anti_passback    BOOLEAN NOT NULL DEFAULT %s,
+    anti_passback_window_sec INTEGER NOT NULL DEFAULT 60,
+    updated_unix             BIGINT  NOT NULL DEFAULT 0
+)`, boolLiteral(d), boolLiteral(d)),
+
+		fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS employee_roles (
+    employee_id  TEXT PRIMARY KEY,
+    role         TEXT NOT NULL DEFAULT '',
+    updated_unix BIGINT NOT NULL DEFAULT 0
+)`),
+
+		fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS pass_events (
+    id            %s,
+    employee_id   TEXT   NOT NULL,
+    zone_id       TEXT   NOT NULL,
+    door_id       TEXT   NOT NULL DEFAULT '',
+    direction     INTEGER NOT NULL DEFAULT 1,
+    occurred_unix BIGINT NOT NULL
+)`, autoInc),
+
+		// The lookup behind anti-passback is "most recent pass for this employee
+		// at this zone". Without this index every scan reads the whole table,
+		// which is the worst place for a scan on the door path.
+		fmt.Sprintf(`
+CREATE INDEX IF NOT EXISTS idx_pass_events_employee_zone_time
+    ON pass_events (employee_id, zone_id, occurred_unix DESC)`),
 	}
 }
 

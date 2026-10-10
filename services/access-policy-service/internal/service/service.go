@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"finger-scanner/services/access-policy-service/internal/adapters/memory"
 	"finger-scanner/services/access-policy-service/internal/domain"
 	"finger-scanner/services/access-policy-service/internal/ports"
 )
@@ -86,7 +85,7 @@ func (s *policyService) Evaluate(
 	// 1. Retrieve zone policy rule (H9: fail closed on unconfigured or unrecognized zones)
 	rule, err := s.repo.GetRule(ctx, zoneID)
 	if err != nil {
-		if errors.Is(err, memory.ErrRuleNotFound) {
+		if errors.Is(err, ports.ErrNotFound) {
 			s.logger.WarnContext(ctx, "access denied: unknown or unconfigured zone",
 				slog.String("zone_id", zoneID),
 				slog.String("employee_id", empID),
@@ -148,11 +147,36 @@ func (s *policyService) Evaluate(
 	now := time.Now().Unix()
 
 	// 4. Symmetric Anti-Passback check (C3: prevent bypass via fake exit or duplicate entries)
+	//
+	// KNOWN LIMITATION - read-modify-write, not atomic.
+	//
+	// This check and the RecordPassEvent at step 5 are two separate calls with
+	// no transaction between them. Two ENTRY swipes for the same employee at
+	// the same zone that arrive concurrently - the same person at Turnstile
+	// Lane 1 and Lane 2 in the same instant, which is precisely the case
+	// anti-passback exists to stop - can both observe "no prior entry" and
+	// both be granted.
+	//
+	// This is a TOCTOU race and it is NOT fixed by durable storage. Sharing
+	// state across replicas (what the sqlstore adapter does) is necessary but
+	// not sufficient; it makes the state visible, not the decision exclusive.
+	// It is reachable only in a multi-replica deployment, because a single
+	// process would have to interleave two goroutines at exactly this point.
+	//
+	// The fix is a transactional compare-and-set at the port level: take a
+	// per-(employee, zone) lock and do the read and the insert inside one
+	// transaction, serializable on Postgres or guarded by a unique constraint.
+	// That is deliberately NOT implemented here - a process-local mutex would
+	// close the single-replica case while leaving the multi-replica case open,
+	// which is the worst outcome: it reads like the problem is solved.
 	if rule.EnforceAntiPassback {
 		lastEvent, err := s.repo.GetLastPassEvent(ctx, empID, zoneID)
-		if err != nil {
+		if err != nil && !errors.Is(err, ports.ErrNotFound) {
 			return nil, fmt.Errorf("failed to check anti-passback state: %w", err)
 		}
+		// A missing pass event means the employee has never been through this
+		// zone, which is exactly what an ENTRY should be allowed to do. It is
+		// not a fault, so it must not become one.
 
 		if direction == 1 { // Entry attempt
 			if lastEvent != nil && lastEvent.Direction == 1 {

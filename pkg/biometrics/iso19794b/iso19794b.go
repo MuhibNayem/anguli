@@ -138,8 +138,9 @@ type MinutiaFormat struct {
 	Type uint8
 	X    uint16
 	Y    uint16
-	// Quality is 1..100 as the standard requires. It is not 0..255: a value
-	// of zero is not a valid minutia quality.
+	// Quality is 1..100 as clause 7.4.2.4 requires. Zero is the standard's
+	// sentinel for "not assessed", and it is valid only when EVERY minutia in
+	// the record uses it; Build rejects a mixture of zero and real qualities.
 	Quality uint8
 	// Orientation is a direction in radians in [0, 2*pi). Any real value is
 	// accepted on input; Build wraps it into that range, which is what the
@@ -333,9 +334,30 @@ func Build(width, height int, fingerPosition, impressionType, quality uint8, min
 		if m.X > maxCoord || m.Y > maxCoord {
 			return nil, fmt.Errorf("iso19794b: minutia %d at (%d,%d) exceeds the 14-bit field", i, m.X, m.Y)
 		}
-		if m.Quality < 1 || m.Quality > 100 {
+		if m.Quality > 100 {
 			return nil, fmt.Errorf("%w: minutia %d quality is %d; the standard defines 1..100", ErrBadQuality, i, m.Quality)
 		}
+	}
+	// Clause 7.4.2.4 defines two valid shapes and no third: every minutia
+	// carries a real 1..100 quality, or the system does not assess quality at
+	// all and every value is the zero sentinel. A mix is malformed - some
+	// minutiae would claim to be measured and some not - so it is rejected
+	// rather than written out as a record no reader should trust.
+	//
+	// Scanned once over the whole slice rather than inside the per-minutia
+	// loop above, which would make this quadratic in the minutiae count.
+	hasZero, hasReal := false, false
+	for _, m := range minutiae {
+		if m.Quality == 0 {
+			hasZero = true
+		} else {
+			hasReal = true
+		}
+	}
+	if hasZero && hasReal {
+		return nil, fmt.Errorf(
+			"%w: clause 7.4.2.4 allows either all-zero (quality not assessed) or all 1..100, not a mixture",
+			ErrBadQuality)
 	}
 
 	extAreaLen := len(minutiae)*minutiaSize + FingerHeaderLen + extAreaLenSize
@@ -366,7 +388,13 @@ func Build(width, height int, fingerPosition, impressionType, quality uint8, min
 		// reserved and written as zero.
 		binary.BigEndian.PutUint16(e[0:2], uint16(m.Type&0x03)<<14|m.X&0x3FFF)
 		binary.BigEndian.PutUint16(e[2:4], m.Y&0x3FFF)
-		e[4] = uint8(math.Round(normalizeAngle(m.Orientation) / angleUnits))
+		// The quotient is strictly below 256 because normalizeAngle returns a
+		// value in [0, 2*pi) - but ROUNDING can push it to exactly 256.0, and
+		// uint8(256.0) is a float-to-integer conversion whose result the Go
+		// specification calls implementation-dependent. Masking costs nothing
+		// and removes the undefined behaviour: 256 steps is one full turn, so
+		// 256 and 0 are the same direction and the wrap is semantically correct.
+		e[4] = uint8(int(math.Round(normalizeAngle(m.Orientation)/angleUnits)) % 256)
 		e[5] = m.Quality
 	}
 

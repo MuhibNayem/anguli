@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"hash/fnv"
@@ -18,17 +19,54 @@ import (
 
 type GatewayHandler struct {
 	clients *clients.ServiceClients
-	logger  *slog.Logger
+	// breakers fronts every downstream RPC. When nil, calls pass straight
+	// through, which keeps unit tests that build a handler directly working.
+	breakers *clients.Breakers
+	logger   *slog.Logger
 }
 
 func NewGatewayHandler(c *clients.ServiceClients, logger *slog.Logger) *GatewayHandler {
+	return NewGatewayHandlerWithBreakers(c, nil, logger)
+}
+
+// NewGatewayHandlerWithBreakers builds a handler whose downstream calls are
+// gated by per-dependency circuit breakers with jittered retries.
+//
+// A nil breakers value disables the gate rather than failing construction, so
+// callers that genuinely have no dependencies wired can still use it.
+func NewGatewayHandlerWithBreakers(c *clients.ServiceClients, b *clients.Breakers, logger *slog.Logger) *GatewayHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &GatewayHandler{
-		clients: c,
-		logger:  logger,
+		clients:  c,
+		breakers: b,
+		logger:   logger,
 	}
+}
+
+// call runs one downstream RPC behind its circuit breaker.
+//
+// The breaker gate is consulted before the retry loop, so a dependency already
+// known to be down is not contacted even once. Making this a helper rather
+// than repeating the closure at each call site is what keeps the wiring honest:
+// a new downstream call added later is either wrapped deliberately or visibly
+// not wrapped, instead of silently bypassing protection.
+func call[T any](ctx context.Context, h *GatewayHandler, w clients.WhichDownstream, fn func(context.Context) (T, error)) (T, error) {
+	var zero T
+	if h.breakers == nil {
+		return fn(ctx)
+	}
+	var out T
+	err := h.breakers.Call(ctx, w, func(c context.Context) error {
+		var err error
+		out, err = fn(c)
+		return err
+	})
+	if err != nil {
+		return zero, err
+	}
+	return out, nil
 }
 
 // EnrollRequest represents REST JSON payload for enrollment.
@@ -83,15 +121,18 @@ func (h *GatewayHandler) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		pix = generateSyntheticPrint(int(width), int(height), req.EmployeeID, 0)
 	}
 
-	resp, err := h.clients.BiometricsClient.EnrollFingerprint(r.Context(), &biometricsv1.EnrollFingerprintRequest{
-		EmployeeId:   req.EmployeeID,
-		FullName:     req.FullName,
-		Position:     biometricsv1.FingerPosition(req.Position),
-		ImageRawGray: pix,
-		Width:        width,
-		Height:       height,
-		Dpi:          500,
-	})
+	resp, err := call(r.Context(), h, clients.DownstreamBiometrics,
+		func(ctx context.Context) (*biometricsv1.EnrollFingerprintResponse, error) {
+			return h.clients.BiometricsClient.EnrollFingerprint(ctx, &biometricsv1.EnrollFingerprintRequest{
+				EmployeeId:   req.EmployeeID,
+				FullName:     req.FullName,
+				Position:     biometricsv1.FingerPosition(req.Position),
+				ImageRawGray: pix,
+				Width:        width,
+				Height:       height,
+				Dpi:          500,
+			})
+		})
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "gRPC enrollment error", slog.String("error", err.Error()))
 		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -100,24 +141,30 @@ func (h *GatewayHandler) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 
 	// L7: Synchronize template to edge gateway cache with explicit error logging and reporting
 	edgeSynced := false
-	tmplResp, err := h.clients.BiometricsClient.GetTemplate(r.Context(), &biometricsv1.GetTemplateRequest{
-		EmployeeId: req.EmployeeID,
-		Position:   biometricsv1.FingerPosition(req.Position),
-	})
-	if err == nil && tmplResp.Found {
-		syncResp, syncErr := h.clients.EdgeGatewayClient.SyncFacilityRoster(r.Context(), &edgegatewayv1.SyncFacilityRosterRequest{
-			FacilityId: "facility-primary",
-			Items: []*edgegatewayv1.SyncEmployeeItem{
-				{
-					EmployeeId: req.EmployeeID,
-					FullName:   req.FullName,
-					Role:       "EMPLOYEE",
-					Position:   biometricsv1.FingerPosition(req.Position),
-					Minutiae:   tmplResp.Template.Minutiae,
-					IsActive:   true,
-				},
-			},
+	tmplResp, err := call(r.Context(), h, clients.DownstreamBiometrics,
+		func(ctx context.Context) (*biometricsv1.GetTemplateResponse, error) {
+			return h.clients.BiometricsClient.GetTemplate(ctx, &biometricsv1.GetTemplateRequest{
+				EmployeeId: req.EmployeeID,
+				Position:   biometricsv1.FingerPosition(req.Position),
+			})
 		})
+	if err == nil && tmplResp.Found {
+		syncResp, syncErr := call(r.Context(), h, clients.DownstreamEdge,
+			func(ctx context.Context) (*edgegatewayv1.SyncFacilityRosterResponse, error) {
+				return h.clients.EdgeGatewayClient.SyncFacilityRoster(ctx, &edgegatewayv1.SyncFacilityRosterRequest{
+					FacilityId: "facility-primary",
+					Items: []*edgegatewayv1.SyncEmployeeItem{
+						{
+							EmployeeId: req.EmployeeID,
+							FullName:   req.FullName,
+							Role:       "EMPLOYEE",
+							Position:   biometricsv1.FingerPosition(req.Position),
+							Minutiae:   tmplResp.Template.Minutiae,
+							IsActive:   true,
+						},
+					},
+				})
+			})
 		if syncErr != nil {
 			h.logger.WarnContext(r.Context(), "edge gateway roster sync failed during enrollment",
 				slog.String("employee_id", req.EmployeeID),
@@ -188,13 +235,16 @@ func (h *GatewayHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 		pix = generateSyntheticPrint(int(width), int(height), req.EmployeeID, req.NoiseFactor)
 	}
 
-	resp, err := h.clients.BiometricsClient.VerifyFingerprint(r.Context(), &biometricsv1.VerifyFingerprintRequest{
-		EmployeeId:        req.EmployeeID,
-		Position:          biometricsv1.FingerPosition(req.Position),
-		ProbeImageRawGray: pix,
-		Width:             width,
-		Height:            height,
-	})
+	resp, err := call(r.Context(), h, clients.DownstreamBiometrics,
+		func(ctx context.Context) (*biometricsv1.VerifyFingerprintResponse, error) {
+			return h.clients.BiometricsClient.VerifyFingerprint(ctx, &biometricsv1.VerifyFingerprintRequest{
+				EmployeeId:        req.EmployeeID,
+				Position:          biometricsv1.FingerPosition(req.Position),
+				ProbeImageRawGray: pix,
+				Width:             width,
+				Height:            height,
+			})
+		})
 	if err != nil {
 		h.writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
@@ -247,17 +297,26 @@ func (h *GatewayHandler) HandleDoorScan(w http.ResponseWriter, r *http.Request) 
 
 	// C5: Prevent untrusted 1:1 identity claims.
 	//
-	// Header presence is checked after trimming: a header sent as
-	// "X-Reader-Token:   " is not a credential. Comparing against "" directly
-	// let a whitespace-only value satisfy this gate, which is the entire
-	// control this branch exists to enforce.
+	// Only a HEADER can authenticate the reader channel. A header sent as
+	// "X-Reader-Token:   " is not a credential, so each value is trimmed before
+	// it is compared against ""; comparing the raw value let a whitespace-only
+	// header satisfy this gate, which is the entire control it exists to
+	// enforce.
+	//
+	// Deliberately NOT part of this check: req.CredentialCardID. That field is
+	// decoded from the request body, which is caller-controlled, so counting it
+	// as a credential lets any caller post
+	//     {"employee_id":"...","credential_card_id":"anything"}
+	// and satisfy the gate without ever proving the request came from real
+	// hardware. The badge value stays in the body because it is the identity
+	// CLAIM; the reader-channel header is what makes that claim trustworthy.
 	if req.EmployeeID != "" {
 		readerToken := strings.TrimSpace(r.Header.Get("X-Reader-Token"))
 		readerID := strings.TrimSpace(r.Header.Get("X-Reader-ID"))
 		apiKey := strings.TrimSpace(r.Header.Get("X-API-Key"))
-		if readerToken == "" && readerID == "" && apiKey == "" && strings.TrimSpace(req.CredentialCardID) == "" {
+		if readerToken == "" && readerID == "" && apiKey == "" {
 			h.writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": "untrusted identity claim: 1:1 verification requires authenticated reader channel (X-Reader-Token/X-Reader-ID) or physical badge credential",
+				"error": "untrusted identity claim: 1:1 verification requires an authenticated reader channel (X-Reader-Token, X-Reader-ID or X-API-Key)",
 			})
 			return
 		}
@@ -269,17 +328,20 @@ func (h *GatewayHandler) HandleDoorScan(w http.ResponseWriter, r *http.Request) 
 	probePix := generateSyntheticPrint(int(width), int(height), req.EmployeeID, req.NoiseFactor)
 
 	// Call edge gateway turnstile controller (executes matching, policy evaluation, and relay strike)
-	edgeResp, err := h.clients.EdgeGatewayClient.ProcessTurnstileScan(r.Context(), &edgegatewayv1.ProcessTurnstileScanRequest{
-		TurnstileId:       req.TurnstileID,
-		ZoneId:            req.ZoneID,
-		Direction:         accesscontrolv1.DoorDirection(req.Direction),
-		EmployeeId:        req.EmployeeID,
-		CredentialCardId:  req.CredentialCardID,
-		ProbeImageRawGray: probePix,
-		ImageWidth:        width,
-		ImageHeight:       height,
-		ScanTimestampUnix: time.Now().Unix(),
-	})
+	edgeResp, err := call(r.Context(), h, clients.DownstreamEdge,
+		func(ctx context.Context) (*edgegatewayv1.ProcessTurnstileScanResponse, error) {
+			return h.clients.EdgeGatewayClient.ProcessTurnstileScan(ctx, &edgegatewayv1.ProcessTurnstileScanRequest{
+				TurnstileId:       req.TurnstileID,
+				ZoneId:            req.ZoneID,
+				Direction:         accesscontrolv1.DoorDirection(req.Direction),
+				EmployeeId:        req.EmployeeID,
+				CredentialCardId:  req.CredentialCardID,
+				ProbeImageRawGray: probePix,
+				ImageWidth:        width,
+				ImageHeight:       height,
+				ScanTimestampUnix: time.Now().Unix(),
+			})
+		})
 	if err != nil {
 		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "edge gateway scan error: " + err.Error()})
 		return
@@ -332,10 +394,13 @@ func (h *GatewayHandler) HandleResetAPB(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	resp, err := h.clients.AccessPolicyClient.ResetAntiPassback(r.Context(), &accesscontrolv1.ResetAntiPassbackRequest{
-		EmployeeId: req.EmployeeID,
-		ZoneId:     req.ZoneID,
-	})
+	resp, err := call(r.Context(), h, clients.DownstreamPolicy,
+		func(ctx context.Context) (*accesscontrolv1.ResetAntiPassbackResponse, error) {
+			return h.clients.AccessPolicyClient.ResetAntiPassback(ctx, &accesscontrolv1.ResetAntiPassbackRequest{
+				EmployeeId: req.EmployeeID,
+				ZoneId:     req.ZoneID,
+			})
+		})
 	if err != nil {
 		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

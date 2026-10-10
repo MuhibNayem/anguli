@@ -2,7 +2,9 @@
 
 **Document ID:** `ANGULI-STATUS-2026-10-10`
 **Last updated:** October 10, 2026
-**Scope:** anguli fingerprint access platform, at commit `b6ad0c3` and the work committed alongside it.
+**Scope:** anguli fingerprint access platform. Kept current with `main`; the
+1:N figures below are re-measured on every change to the search path, and the
+commit they were measured at is named in the section that uses them.
 
 This is the single current source of truth for what this platform can and
 cannot do in production. It exists because the two earlier documents in this
@@ -45,6 +47,7 @@ should not be cited as such.
 | CBEFF container (ISO/IEC 19785-1) | Implemented | Fingerprint minutiae and image records can be wrapped and unwrapped with the format owner and type identifiers the standard assigns. |
 | PIV CBEFF header (NIST SP 800-76-2) | Header implemented | The 88-byte PIV patron format header, with the INCITS modality values Table 15 assigns and field values pinned to the standard's own worked example. The CBEFF signature block is **not** implemented — see below. |
 | Circuit breaker and overload shedding | Production-ready | Breakers gate every downstream RPC; the reject fast path is lock-free. |
+| Match reproducibility | **Was not production-ready until this cycle** | The matcher was **nondeterministic**: spatial-consensus ties were broken by Go map iteration order, so the same probe against the same finger scored differently on repeated calls in about half of all trials. A deny near the threshold could not be reproduced or audited. Tie-breaks are now total and ordered; `TestVerifyIsDeterministic` and `TestVerifyIsDeterministicUnderConcurrency` guard it. |
 | Template key rotation | Production-ready | Zero-downtime rotation with no re-enrollment: a keyring loaded from the environment, and a `keyrotate` command that decrypts, re-encrypts and verifies every migrated template. Proven to leave the old key unable to read migrated records. |
 
 ## What is not production-ready
@@ -54,39 +57,74 @@ optimistic reading is how people get locked out of buildings.
 
 ### 1:N identification is still linear in enrolled fingers
 
-Walk-up 1:N search is **O(number of enrolled fingers)**. That was made ~11x
-cheaper but not sub-linear.
+Walk-up 1:N search is **O(number of enrolled fingers)**. It has been made about
+**22x cheaper** since the first measurement here, and it is still not
+sub-linear. Saying so plainly is the point of this section: a deployment sized
+against the wrong reading of this file is how a turnstile starts timing out.
 
-What was done: a cached pre-decrypted gallery removed the per-scan database read
-and AES-GCM decryption, a worker pool removed the single-goroutine constraint,
-and `Cylinder.SimilarityWithShift` — which profiled at **85% of search CPU**,
-walking all 1536 cylinder bits one at a time — was rewritten to work one spatial
-cell at a time using popcount and the inclusion-exclusion identity. Its output
-is proven **bit-identical** to the original against randomised cylinders, and it
-is 5.1x faster.
+What was done, in three layers:
 
-Measured, warm cache, 32 minutiae per finger:
+1. A cached, pre-decrypted gallery removed the per-scan database read and
+   AES-GCM decryption, and a worker pool removed the single-goroutine
+   constraint.
+2. `Cylinder.SimilarityWithShift`, which profiled at **85% of search CPU**
+   walking all 1536 cylinder bits one at a time, was rewritten to work one
+   spatial cell at a time using popcount and the inclusion-exclusion identity —
+   **5.1x faster**.
+3. Re-profiling showed the popcounts were then no longer the cost. What was
+   left was scaffolding and recomputation: the rotation index was recomputed
+   with two integer modulos for every cell when it takes at most six values;
+   the accumulators were heap-allocated twice per pair; a branch for the
+   identity rotation sat in the innermost loop; the rotated operand's popcount
+   was recomputed once per rotation even though rotation is a permutation and
+   therefore leaves it unchanged; and cells whose value is zero were visited
+   even though they contribute exactly zero. Measured cylinder density is 6.4%
+   of bits over 22% of cells, so the last item alone removes ~78% of the
+   iterations. Together, **2.9x more**.
 
-| Enrolled fingers | Per walk-up | Before |
-|---:|---:|---:|
-| 100 | 20 ms | 165 ms |
-| 200 | 38 ms | 319 ms |
-| 400 | 71 ms | 628 ms |
-| 800 | 144 ms | 1.24 s |
-| 1600 | 280 ms | 2.47 s |
-| 3200 | 576 ms | — |
+Every one of those changes is exactly output-identical, and that is asserted
+against a copy of the original bit-at-a-time loop over randomised cylinders
+across two corpus shapes (single-bit cells and uniform multi-bit cells).
+Bit-identical agreement on random inputs is a stronger guarantee than
+agreement on the captures that happen to be in front of you: it holds for
+every input. The suite is mutation-tested, and correcting an equivalence
+failure by reasoning about where the difference "must" be has twice been the
+wrong move — instrumenting the function body and printing the intermediate
+counts is what found both defects.
 
-**The 200 ms turnstile SLA is now met at roughly 1100 enrolled fingers** on
-development hardware, up from about 100. 1:1 is unaffected.
+Measured, warm cache, 32 minutiae per finger, Apple M1 Pro, 8 cores:
 
-What is still missing: the growth is linear, and constant-factor work divides
-the cost without changing the order. A worker pool cannot fix that, and neither
-can more caching. Genuine campus scale needs a change to the algorithm — a single
-global MCC bitstring compared by Hamming distance is O(words) per pair rather
-than O(cylinders²), at some cost in rotation tolerance. Not implemented, and
-not implementable responsibly without real fingerprint captures to validate
-against; the synthetic minutiae in-tree are mutually indistinguishable and
-cannot serve that purpose.
+| Enrolled fingers | Per walk-up | Before | Original |
+|---:|---:|---:|---:|
+| 100 | 8.2 ms | 20 ms | 165 ms |
+| 200 | 14.6 ms | 38 ms | 319 ms |
+| 400 | 26.5 ms | 71 ms | 628 ms |
+| 800 | 50.0 ms | 144 ms | 1.24 s |
+| 1600 | 94.8 ms | 280 ms | 2.47 s |
+| 3200 | 184 ms | 576 ms | — |
+| 6400 | 381 ms | — | — |
+
+**The 200 ms turnstile SLA is now met at roughly 3400 enrolled fingers**, up
+from roughly 1100 before this cycle and about 100 before any of it. 1:1 is
+unaffected.
+
+What is still missing is the only thing that matters at campus scale: the
+growth is linear, and constant-factor work divides the cost without changing
+the order. A worker pool cannot fix that, and neither can more caching or
+another 3x on the kernel — three rounds of exactly this work have now bought
+22x and the next doubling is the same work again. Genuine campus scale needs a
+change to the algorithm: a single global MCC bitstring compared by Hamming
+distance is O(words) per pair rather than O(cylinders²), at some cost in
+rotation tolerance.
+
+That change is not implemented, and the honest reason is now narrower than
+"we would need data". The constant-factor work above needed no real captures,
+because the claim being made was "identical output, less work" and randomised
+inputs prove exactly that. A global-bitstring matcher makes a different claim —
+it changes what a score *means* — and that cannot be validated against
+synthetic minutiae, which are mutually indistinguishable and would score every
+candidate alike. So the blocker is accuracy, not throughput, and it would need
+real captures before it could honestly be shipped.
 
 ### No presentation attack detection
 
@@ -147,3 +185,12 @@ production-ready edge and a production-ready security posture**, and it is
 **not** a Fortune 500 campus identity platform. The gap is concentrated in
 three places: 1:N scale, presentation attack detection, and reader-protocol
 ecosystem support. Each is large, and none of them is a matter of polish.
+
+Of the three, 1:N is the one that moved. Three rounds of measured,
+output-identical optimisation have taken the gallery that fits a 200 ms
+turnstile SLA from roughly 100 fingers to roughly 3400, and none of it
+required real captures because none of it changed a score. What remains there
+is the algorithm's order, not its constant — and the two remaining gaps are
+not closable by this codebase at all: PAD needs multispectral or depth-sensing
+hardware, and SIA MINEX is a paid specification that would have to be bought
+before it could be implemented honestly rather than guessed at.

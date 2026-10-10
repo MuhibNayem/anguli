@@ -77,13 +77,33 @@ func (m *Matcher) Verify(ctx context.Context, probe, gallery *Template) (MatchVe
 	}
 
 	// Step 1: Collect candidate pairings with similarity >= threshold
+	//
+	// Everything the pairwise kernel needs that does not vary per pair is
+	// computed once here: the probe's occupied cells and popcount, and the
+	// gallery's popcount. A Cylinder is 204 bytes and a walk-up scores every
+	// probe cylinder against every gallery cylinder, so the loops are
+	// index-based rather than `for _, cyl` - ranging by value copied the whole
+	// struct on every inner iteration, which was ~200 MB of memcpy per search.
+	probeCells := probeCellSets(probe.Cylinders)
+	probePops := make([]int, len(probe.Cylinders))
+	for i := range probe.Cylinders {
+		probePops[i] = popCount(&probe.Cylinders[i].Bits)
+	}
+	galleryPops := make([]int, len(gallery.Cylinders))
+	for i := range gallery.Cylinders {
+		galleryPops[i] = popCount(&gallery.Cylinders[i].Bits)
+	}
+
 	var candidates []candidatePair
-	for pIdx, pCyl := range probe.Cylinders {
-		for gIdx, gCyl := range gallery.Cylinders {
-			sim := pCyl.Similarity(&gCyl)
+	for pIdx := range probe.Cylinders {
+		pCyl := &probe.Cylinders[pIdx]
+		for gIdx := range gallery.Cylinders {
+			gCyl := &gallery.Cylinders[gIdx]
+
+			sim := pCyl.Similarity(gCyl)
 			// Fast prune: only test angular shift if candidate already exhibits plausible overlap
 			if sim < m.CylinderMatchThreshold && sim >= 0.12 {
-				shiftedSim := pCyl.SimilarityWithShift(&gCyl, 1)
+				shiftedSim := shiftedBest(probeCells[pIdx], gCyl, sim, probePops[pIdx], galleryPops[gIdx], 1)
 				if shiftedSim > sim {
 					sim = shiftedSim
 				}
@@ -215,6 +235,8 @@ func (m *Matcher) Verify(ctx context.Context, probe, gallery *Template) (MatchVe
 
 	bestInliers := 0
 	var bestInlierPairs []transPair
+	bestKey := gridKey{}
+	bestClusterScore := 0.0
 	for k := range grid {
 		var cluster []transPair
 		for dx := -1; dx <= 1; dx++ {
@@ -225,9 +247,50 @@ func (m *Matcher) Verify(ctx context.Context, probe, gallery *Template) (MatchVe
 				}
 			}
 		}
-		if len(cluster) > bestInliers {
+
+		// Tie-breaks here are load-bearing, not decoration.
+		//
+		// Go randomises map iteration order, so taking the first cluster of
+		// maximum size made the result depend on the runtime rather than on the
+		// inputs. Measured on random templates, the same probe against the same
+		// finger returned a different score on repeated calls in roughly half
+		// of all trials.
+		//
+		// For an access control decision that is not a cosmetic defect: a
+		// score near the threshold cannot be reproduced, an incident cannot be
+		// reconstructed from the captured template, and a flaky test cannot
+		// distinguish a regression from map ordering.
+		//
+		// The order of preference is therefore: most inliers, then the cluster
+		// containing the best cylinder similarity, then the lexicographically
+		// smallest grid key. Every step is total, so the choice is a function of
+		// the inputs and nothing else.
+		clusterScore := 0.0
+		for _, tp := range cluster {
+			if tp.score > clusterScore {
+				clusterScore = tp.score
+			}
+		}
+
+		better := false
+		switch {
+		case len(cluster) > bestInliers:
+			better = true
+		case len(cluster) < bestInliers:
+			better = false
+		case clusterScore > bestClusterScore:
+			better = true
+		case clusterScore < bestClusterScore:
+			better = false
+		default:
+			better = k.gx < bestKey.gx || (k.gx == bestKey.gx && k.gy < bestKey.gy)
+		}
+
+		if better {
 			bestInliers = len(cluster)
 			bestInlierPairs = cluster
+			bestKey = k
+			bestClusterScore = clusterScore
 		}
 	}
 

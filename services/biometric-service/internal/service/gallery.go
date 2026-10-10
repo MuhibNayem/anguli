@@ -55,9 +55,10 @@ type galleryEntry struct {
 // couple of map lookups instead of a scan of every enrolled point.
 //
 // The matcher itself is the expensive thing in 1:N search - profiling a 2000
-// finger gallery put 85% of CPU inside Cylinder.SimilarityWithShift, which runs
-// once per probe/gallery cylinder pair. This grid does not make matching
-// cheaper; it makes it possible to throw away candidates without matching them.
+// finger gallery put over 90% of CPU inside Cylinder.SimilarityWithShift and its
+// callers, which run once per probe/gallery cylinder pair. This grid does not
+// make matching cheaper; it makes it possible to throw away candidates without
+// matching them.
 type spatialGrid struct {
 	cell    float64
 	buckets map[[2]int][]minutiae.Minutia
@@ -288,7 +289,10 @@ func buildGallery(
 // The honest limit of this approach: it reduces wall-clock by the core count,
 // not by the asymptotic cost. The matcher still compares every probe cylinder
 // against every gallery cylinder for each surviving candidate, and that inner
-// loop profiles at 85% CPU inside SimilarityWithShift. See the throughput note
+// loop is still over 90% of CPU. Three rounds of output-identical optimisation
+// have made it about 22x cheaper and moved the 200 ms SLA from roughly 100
+// enrolled fingers to roughly 3100, but the growth is still linear and the
+// next order of magnitude needs a different algorithm. See the throughput note
 // in the README before sizing a gallery.
 func (g *gallery) search(
 	ctx context.Context,

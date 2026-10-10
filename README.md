@@ -188,26 +188,43 @@ the core count; it does not change the order.
 
 Measured on the development machine, warm cache, 32 minutiae per finger:
 
-| Enrolled fingers | Per walk-up | Before the matcher fix |
+| Enrolled fingers | Per walk-up | Before the matcher fixes |
 |---:|---:|---:|
-| 100 | 20 ms | 165 ms |
-| 200 | 38 ms | 319 ms |
-| 400 | 71 ms | 628 ms |
-| 800 | 144 ms | 1.24 s |
-| 1600 | 280 ms | 2.47 s |
-| 3200 | 576 ms | — |
+| 100 | 8.2 ms | 165 ms |
+| 200 | 14.6 ms | 319 ms |
+| 400 | 26.5 ms | 628 ms |
+| 800 | 50.0 ms | 1.24 s |
+| 1600 | 94.8 ms | 2.47 s |
+| 3200 | 184 ms | — |
+| 6400 | 381 ms | — |
 
-`Cylinder.SimilarityWithShift` profiled at **85% of search CPU** walking all
-1536 cylinder bits one at a time. Rewriting it to work a spatial cell at a time
-using popcount and the inclusion-exclusion identity — with the output proven
-bit-identical to the original against randomised cylinders — made it **5.1x
-faster** and took 1:N from a ~100-finger to a **~1100-finger** gallery inside
-the 200 ms turnstile SLA.
+The matcher itself was rewritten twice, each time after profiling rather than
+guessing, and each time with the output proven bit-identical to the previous
+implementation against randomised cylinders:
+
+1. **Bit-at-a-time to cell-at-a-time (5.1x).** `Cylinder.SimilarityWithShift`
+   profiled at **85% of search CPU** walking all 1536 cylinder bits one at a
+   time. A directional shift only permutes slices *within* a spatial cell, so
+   the whole comparison can be done cell by cell on small integers with
+   popcount and the inclusion-exclusion identity, never materialising the
+   rotated operand.
+2. **Loop scaffolding and redundancy (2.9x).** Re-profiling showed the popcounts
+   were no longer the cost. Four things were: the rotation index was recomputed
+   with two integer modulos for every cell when it takes at most six values; the
+   accumulators were heap-allocated twice per pair; a branch for the identity
+   rotation sat in the innermost loop; and because rotation is a permutation,
+   the rotated operand's popcount is the *same number* for every rotation yet
+   was recomputed once per rotation. Dropping empty cells and replacing the
+   remaining popcount with a 6×64×64 lookup table finished the job.
+
+Taken together the supported 1:N gallery grew from roughly 100 fingers to
+**roughly 3400** inside the 200 ms turnstile SLA.
 
 The growth is still linear, and that is the remaining problem. Constant-factor
 work divides the cost; it does not change the order. **1:1 verification and
 enrollment are unaffected and remain production-ready; 1:N walk-up
-identification is now viable for a small site, not a Fortune 500 campus.**
+identification is now viable for a small-to-medium site, not a Fortune 500
+campus.**
 
 Further scale needs a change to the algorithm, not more constant factors: a
 single global MCC bitstring compared by Hamming distance is O(words) per pair

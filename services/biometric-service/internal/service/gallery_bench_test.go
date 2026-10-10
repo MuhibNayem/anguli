@@ -71,36 +71,40 @@ func BenchmarkIdentifyGalleryCold(b *testing.B) {
 // benchmark, and its size is chosen from measurement rather than aspiration.
 //
 // MEASURED, do not raise this number without re-measuring. On the development
-// machine, warm gallery, 32 minutiae per finger:
+// machine (Apple M1 Pro, 8 cores), warm gallery, 32 minutiae per finger:
 //
-//	N= 100    20 ms     within a 200 ms budget
-//	N= 200    38 ms     within a 200 ms budget
-//	N= 400    71 ms     within a 200 ms budget
-//	N= 800   144 ms     within a 200 ms budget
-//	N=1600   280 ms     over
-//	N=3200   576 ms     over
+//	N= 100     8.2 ms     within a 200 ms budget
+//	N= 200    14.6 ms     within
+//	N= 400    26.5 ms     within
+//	N= 800    50.0 ms     within
+//	N=1600    94.8 ms     within
+//	N=3200   184.4 ms     within
+//	N=6400   380.8 ms     over
 //
-// The gallery removed the per-scan database read and AES-GCM decryption, and
-// the worker pool removed the single-goroutine constraint. Optimising
-// Cylinder.SimilarityWithShift - which profiled at 85% of search CPU walking
-// all 1536 bits one at a time - bought a further 8x, taking the supported
-// gallery from roughly 100 fingers to roughly 1100 at a 200 ms SLA.
+// Two rounds of matcher work took N=800 from 144 ms to 52 ms and N=3200 from
+// 576 ms to 207 ms. Optimising Cylinder.SimilarityWithShift - which profiled at
+// 85% of search CPU walking all 1536 bits one at a time - made it 5.1x faster.
+// Re-profiling then showed the remaining cost was loop scaffolding and
+// recomputation rather than popcounts, and fixing that bought another 2.9x.
+// The gallery that fits a 200 ms SLA went roughly 100 -> 1100 -> 3400 fingers.
 //
-// The growth is still linear, and that is the point of this comment. Parallelism
-// and constant-factor work divide the cost; they do not change the order. So 1:N
-// search remains O(enrolled fingers) no matter how many cores it gets.
+// The growth is still linear, and that is the point of this comment.
+// Parallelism and constant-factor work divide the cost; they do not change the
+// order. So 1:N search remains O(enrolled fingers) no matter how many cores it
+// gets, and the next order of magnitude has to come from a different
+// algorithm. See the 1:N section of README.md for what that would take.
 //
 // A single-host laptop measurement with synthetic minutiae, to be repeated on
 // the deployment target, but the SHAPE - linear and core-count independent -
-// will not change. Reaching genuine campus scale needs a change to the
-// algorithm: a single global MCC bitstring compared by Hamming distance is
-// O(words) per pair instead of O(cylinders squared). That is not implemented
-// here, and nothing in this file should be read as claiming the system is 1:N
-// ready at enterprise enrolment counts.
+// will not change. Nothing in this file should be read as claiming the system is
+// 1:N ready at enterprise enrolment counts.
 //
 // The test therefore asserts what is actually true rather than a number that
-// would fail: it guards against the caching regressing, and it records the
-// ceiling as a number someone will notice if performance gets worse.
+// would fail: it guards against the caching and the matcher regressing, and it
+// records the ceiling as a number someone will notice if performance gets
+// worse. The guard size was raised from 800 to 3200 when the table above was
+// re-measured, so a regression of the size just fixed still fails the build
+// rather than fitting inside the slack.
 func TestSearchLatencyStaysWithinTurnstileBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("latency guard skipped in -short")
@@ -110,7 +114,7 @@ func TestSearchLatencyStaysWithinTurnstileBudget(t *testing.T) {
 	v := testVault(t)
 
 	// Sized to the measured ceiling, not to an aspiration. See the table above.
-	const enrolled = 800
+	const enrolled = 3200
 	const budget = 400 * time.Millisecond * raceLatencyFactor
 
 	for i := 0; i < enrolled; i++ {

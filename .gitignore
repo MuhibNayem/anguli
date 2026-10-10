@@ -7,18 +7,24 @@
 *.p12
 *.pfx
 *.crt
-secrets/
+/secrets/
 credentials.json
 
-# Go build artifacts
+# Go build artifacts.
+#
+# Binary names are anchored with a leading slash on purpose. A bare pattern
+# like `api-gateway` matches at EVERY level, so it silently excluded the whole
+# services/api-gateway/ directory tree from the repository rather than just the
+# compiled binary. Bare service names cost us 34 source files before this was
+# caught - keep the slashes.
 /bin/
 /build/
 /dist/
-anguli
-api-gateway
-biometric-service
-access-policy-service
-edge-gateway-service
+/anguli
+/api-gateway
+/biometric-service
+/access-policy-service
+/edge-gateway-service
 *.exe
 *.test
 *.out

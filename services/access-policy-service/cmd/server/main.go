@@ -1,0 +1,100 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
+
+	accesscontrolv1 "finger-scanner/pkg/api/v1/accesscontrol"
+	"finger-scanner/pkg/telemetry"
+	grpchandler "finger-scanner/services/access-policy-service/internal/adapters/grpc"
+	"finger-scanner/services/access-policy-service/internal/adapters/memory"
+	"finger-scanner/services/access-policy-service/internal/service"
+)
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "50052"
+	}
+
+	env := os.Getenv("ENVIRONMENT")
+	if env == "" {
+		env = "production"
+	}
+
+	tel, cleanupTel, err := telemetry.Setup(ctx, telemetry.Config{
+		ServiceName:    "access-policy-service",
+		ServiceVersion: "1.0.0",
+		Environment:    env,
+		EnableStdout:   false,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to setup telemetry: %v\n", err)
+		os.Exit(1)
+	}
+	defer cleanupTel(context.Background())
+
+	logger := tel.Logger
+	logger.InfoContext(ctx, "starting access-policy-service", slog.String("port", port))
+
+	repo := memory.NewMemoryPolicyRepository()
+	policySvc := service.NewPolicyService(repo, logger)
+	grpcServerHandler := grpchandler.NewServer(policySvc)
+
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to bind TCP port", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	grpcServer := grpc.NewServer()
+	accesscontrolv1.RegisterAccessPolicyServiceServer(grpcServer, grpcServerHandler)
+
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("accesscontrol.v1.AccessPolicyService", grpc_health_v1.HealthCheckResponse_SERVING)
+	grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
+	reflection.Register(grpcServer)
+
+	serverErrChan := make(chan error, 1)
+	go func() {
+		logger.InfoContext(ctx, "gRPC server listening", slog.String("addr", listener.Addr().String()))
+		if err := grpcServer.Serve(listener); err != nil && err != grpc.ErrServerStopped {
+			serverErrChan <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		logger.InfoContext(ctx, "shutdown signal received, stopping access-policy-service...")
+		stopped := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(stopped)
+		}()
+
+		select {
+		case <-stopped:
+			logger.InfoContext(ctx, "gRPC server stopped cleanly")
+		case <-time.After(5 * time.Second):
+			logger.WarnContext(ctx, "graceful shutdown timed out, forcing stop")
+			grpcServer.Stop()
+		}
+	case err := <-serverErrChan:
+		logger.ErrorContext(ctx, "server exited unexpectedly", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+}

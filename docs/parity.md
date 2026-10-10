@@ -1,3 +1,14 @@
+> **SUPERSEDED — dated snapshot, do not cite as current.**
+>
+> Written 2026-10-09. Several conclusions in this document were falsified by
+> later work. In particular "100% permanent data loss" on pod eviction is false
+> (durable SQLite/PostgreSQL storage exists), and the edge data being "solely in
+> RAM" was true of the WAL path only until it was given a persistent default and
+> a mounted volume. The findings below are preserved unedited as a record of
+> what was believed on that date.
+>
+> **Current status: [`production-status.md`](production-status.md).**
+
 # Enterprise Parity & Resilience Evaluation Report
 
 **Document ID:** `AEGIS-DOC-PARITY-2026-v1`  

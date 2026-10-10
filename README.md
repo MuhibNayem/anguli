@@ -71,6 +71,28 @@ starting a service with an empty one.
 | `TLS_REQUIRE_MTLS` | `false` | Set `true` to demand and verify a client certificate |
 | `PORT` | per-service | `50051` / `50052` / `50053` / `8080` |
 
+### Interoperability: ISO/IEC standards
+
+| Package | Standard | What it is |
+|---|---|---|
+| `pkg/biometrics/iso19794b` | ISO/IEC 19794-2:2005 | Finger minutiae record. Field layouts transcribed from the primary text. |
+| `pkg/biometrics/iso19794` | ISO/IEC 19794-4 | Finger image record. |
+| `pkg/biometrics/cbeff` | ISO/IEC 19785-1 | CBEFF Biometric Information Record container, so either of the above can be exchanged with a third-party PACS. |
+| `pkg/biometrics/dataset` | — | Loader and evaluator for real fingerprint datasets (FAR/FRR/EER/ROC). |
+
+CBEFF wraps a data block and identifies it: format owner `0x0101` (ISO/IEC JTC
+1/SC 37), format type `0x0001` for a 19794-2 minutiae record and `0x0007` for
+a 19794-4 image, biometric type `0x08` for finger. Those identifiers are
+asserted in tests against values the standards state, not merely round-tripped
+against this encoder.
+
+### Current production status
+
+[`docs/production-status.md`](docs/production-status.md) is the authoritative
+statement of what this platform can and cannot do in production, with measured
+numbers. The older `docs/parity.md` and `docs/findings-audit-2026-10-09.md`
+contradict each other and are marked superseded.
+
 ### Inter-service gRPC transport
 
 Every service-to-service gRPC hop — gateway to biometric, policy and edge, and

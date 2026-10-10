@@ -28,10 +28,30 @@ type memoryEdgeCache struct {
 }
 
 // NewMemoryEdgeCache creates a thread-safe local edge cache with durable disk-backed WAL.
+//
+// The default path matters more than it looks. This file is the audit trail for
+// door activity that happened while the fog node could not reach the core -
+// the entries that would otherwise vanish without anyone noticing. Two
+// defaults are actively wrong for that job:
+//
+//   - os.TempDir() is a fixed name, so two edge instances on one host opened
+//     the same file and interleaved each other's audit records into a single
+//     corrupt log.
+//   - os.TempDir() is also volatile: a reboot, a tmpfiles sweep or a container
+//     recreate silently discarded the offline audit trail.
+//
+// So the default is now a relative "data" directory, matching the STORAGE_DATA_DIR
+// convention the other services use, which resolves under the persistent volume
+// a real deployment mounts. EDGE_WAL_PATH overrides it when a specific file is
+// wanted; the edge deployment sets it to /data/edge-offline.wal.
 func NewMemoryEdgeCache() ports.EdgeRepository {
 	walPath := os.Getenv("EDGE_WAL_PATH")
 	if walPath == "" {
-		walPath = filepath.Join(os.TempDir(), "aegis_edge_offline.wal")
+		dataDir := os.Getenv("EDGE_DATA_DIR")
+		if dataDir == "" {
+			dataDir = "data"
+		}
+		walPath = filepath.Join(dataDir, "edge-offline.wal")
 	}
 	return NewDurableEdgeCache(walPath)
 }

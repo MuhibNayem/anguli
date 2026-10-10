@@ -57,3 +57,16 @@ yarn-error.log*
 /tmp/
 *.pid
 *.log
+# Runtime state directories.
+#
+# pkg/store defaults STORAGE_DATA_DIR to "data" and the edge WAL follows the
+# same convention, so any process started without an explicit path creates
+# one relative to its working directory. In a deployment that is the mounted
+# volume; under `go test` it is litter in the package directory, which is what
+# this rule keeps out of the tree. Nothing is tracked under a data/ directory,
+# so the pattern cannot hide source.
+data/
+*.db
+*.db-shm
+*.db-wal
+*.wal

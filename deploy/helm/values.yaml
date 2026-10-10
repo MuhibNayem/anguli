@@ -80,7 +80,15 @@ components:
     port: 50053
     replicas: 1
     healthScheme: grpc
-    persistence: false
+    # The edge keeps its offline audit WAL here. It is the record of door
+    # activity that happened while the fog node could not reach the core, so
+    # losing it to a pod restart loses exactly the events nobody else saw.
+    persistence: true
+    # The edge does not use pkg/store, so STORAGE_DRIVER does not apply to it.
+    # Its offline audit WAL is pointed at the mounted volume explicitly.
+    extraEnv:
+      - name: EDGE_WAL_PATH
+        value: /data/edge-offline.wal
   - name: api-gateway
     port: 8080
     replicas: 2

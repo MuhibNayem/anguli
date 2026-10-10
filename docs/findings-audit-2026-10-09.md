@@ -4,6 +4,19 @@
 **Scope:** Full static review of all hand-written source + empirical runtime verification
 **Method:** Every file read in full; findings marked **[PROVEN]** were reproduced by executing the real services in an isolated harness (harness deleted after use; repo untouched). Findings marked **[READ]** are from code inspection only.
 
+> **SUPERSEDED — dated snapshot, do not cite as current.**
+>
+> Written 2026-10-09. The claim below that findings are "100% remediated and
+> verified" was **false**. Most visibly, gRPC mTLS/TLS 1.3 is listed here as
+> implemented: `pkg/security/tls` existed and was unit-tested, but no service
+> ever called it, and every inter-service hop ran in cleartext until 2026-10-10.
+> Other items listed as done were later reopened and re-verified.
+>
+> Preserved unedited as a record of what was believed on that date.
+>
+> **Current status: [`production-status.md`](production-status.md).**
+
+
 ---
 
 ## Executive summary

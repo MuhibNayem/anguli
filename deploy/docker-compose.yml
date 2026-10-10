@@ -75,6 +75,12 @@ services:
       - PORT=50053
       - POLICY_ADDR=access-policy-service:50052
       - ENVIRONMENT=${ENVIRONMENT:-production}
+      # The offline audit WAL records door activity that happened while this
+      # node could not reach the core. Without a volume it dies with the
+      # container, which is precisely the record nobody else has.
+      - EDGE_WAL_PATH=/data/edge-offline.wal
+    volumes:
+      - edge-data:/data
     depends_on:
       access-policy-service:
         condition: service_healthy
@@ -123,4 +129,6 @@ volumes:
   biometric-data:
     driver: local
   policy-data:
+    driver: local
+  edge-data:
     driver: local

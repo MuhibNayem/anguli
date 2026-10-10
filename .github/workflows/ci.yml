@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A superseded run tells you nothing about the current commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build, vet, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify go.mod is tidy
+        # Fails if go.mod/go.sum have drifted from the imports. A dirty module
+        # file means someone committed code that will not build for anyone else.
+        run: |
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit."
+            git diff -- go.mod go.sum
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^vendor/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Unit tests with coverage
+        run: |
+          go test ./pkg/... ./services/... ./api/... \
+            -covermode=atomic -coverprofile=coverage.out -timeout 15m
+
+      - name: Enforce coverage floor
+        # Coverage that only ever falls is not a gate. Floors per package
+        # catch a regression in a specific area; the aggregate catches drift.
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: ${total}%"
+          floor=60
+          below=$(awk -v f="$floor" '
+            BEGIN { FS="[:% ]+" }
+            $1 != "total" && $NF ~ /^[0-9.]+$/ && $NF+0 < f { print $1 }
+          ' coverage.out | sort -u || true)
+          if [ -n "$below" ]; then
+            echo "::error::Packages below the ${floor}% coverage floor:"
+            echo "$below"
+          fi
+          pct=${total%.*}
+          if [ "$pct" -lt "$floor" ]; then
+            echo "::error::Total coverage ${total}% is below the ${floor}% floor"
+            exit 1
+          fi
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  chaos:
+    name: chaos suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      # The suite has its own contractual gate: it fails below 1000 cases and
+      # on any dimension that registered zero. That gate lives in TestMain, so
+      # running a subset with -run would fail by design - run it whole.
+      - name: Run chaos suite with gate
+        run: go test ./test/chaos/ -v -count=1 -timeout 25m
+
+      - name: Run auth chaos suite with gate
+        run: go test ./services/api-gateway/internal/middleware/ -v -count=1 -timeout 10m
+
+      - name: Race detector on concurrency-sensitive packages
+        run: |
+          go test -race -timeout 20m \
+            ./pkg/resilience/ \
+            ./pkg/hardware/... \
+            ./services/api-gateway/... \
+            ./services/biometric-service/...
+
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go mod download
+
+      # A short fuzz run on each target. This is a smoke test that the targets
+      # execute and the corpus loads, not a substitute for a long soak run.
+      - name: Fuzz targets smoke run
+        run: |
+          for target in FuzzCylinderDeserialise FuzzVaultDecrypt FuzzTemplatePipeline FuzzAPBStateMachine; do
+            echo "::group::$target"
+            go test ./test/chaos/ -run "XXX" -fuzz "^${target}$" -fuzztime 30s
+            echo "::endgroup::"
+          done
+
+  build:
+    name: container images
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      matrix:
+        service: [biometric-service, access-policy-service, edge-gateway-service, api-gateway]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Proves the Dockerfiles still build. Images are intentionally not
+      # pushed: this is a build gate, not a release pipeline.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/${{ matrix.service }}.Dockerfile
+          push: false
+          tags: anguli/${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}

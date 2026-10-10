@@ -40,10 +40,10 @@ func (s *Server) EvaluateAccess(ctx context.Context, req *accesscontrolv1.Evalua
 	}
 
 	return &accesscontrolv1.EvaluateAccessResponse{
-		Decision:             accesscontrolv1.AccessDecision(res.Decision),
-		IsGranted:            res.IsGranted,
-		Reason:               res.Reason,
-		RelayOpenDurationMs:  res.RelayOpenDurationMs,
+		Decision:            accesscontrolv1.AccessDecision(res.Decision),
+		IsGranted:           res.IsGranted,
+		Reason:              res.Reason,
+		RelayOpenDurationMs: res.RelayOpenDurationMs,
 	}, nil
 }
 

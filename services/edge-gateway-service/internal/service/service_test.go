@@ -327,4 +327,3 @@ func TestEdgeService_DynamicStatus(t *testing.T) {
 		t.Errorf("expected IsOnline=false when policy service is unreachable")
 	}
 }
-

@@ -243,14 +243,14 @@ func TestFullMicroservicesE2E(t *testing.T) {
 
 	// Turnstile Scan
 	doorScanResp, err := edgeClient.ProcessTurnstileScan(ctx, &edgegatewayv1.ProcessTurnstileScanRequest{
-		TurnstileId:        "turnstile-01",
-		ZoneId:             "zone-main-gate",
-		Direction:          accesscontrolv1.DoorDirection_DOOR_DIRECTION_ENTRY,
-		EmployeeId:         "EMP-007",
-		ProbeImageRawGray:  rawPix,
-		ImageWidth:         width,
-		ImageHeight:        height,
-		ScanTimestampUnix:  time.Now().Unix(),
+		TurnstileId:       "turnstile-01",
+		ZoneId:            "zone-main-gate",
+		Direction:         accesscontrolv1.DoorDirection_DOOR_DIRECTION_ENTRY,
+		EmployeeId:        "EMP-007",
+		ProbeImageRawGray: rawPix,
+		ImageWidth:        width,
+		ImageHeight:       height,
+		ScanTimestampUnix: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("door scan error: %v", err)

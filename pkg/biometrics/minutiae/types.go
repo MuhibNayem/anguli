@@ -20,8 +20,8 @@ type Minutia struct {
 
 // Template represents the full set of extracted minutiae points for a fingerprint.
 type Template struct {
-	Width    int       `json:"width"`
-	Height   int       `json:"height"`
-	Points   []Minutia `json:"points"`
-	NFIQ     uint8     `json:"nfiq"`
+	Width  int       `json:"width"`
+	Height int       `json:"height"`
+	Points []Minutia `json:"points"`
+	NFIQ   uint8     `json:"nfiq"`
 }

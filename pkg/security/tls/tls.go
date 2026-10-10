@@ -13,12 +13,12 @@ import (
 
 // Config specifies TLS parameters for gRPC inter-service communication.
 type Config struct {
-	Enabled        bool
-	CertFile       string
-	KeyFile        string
-	CAFile         string
-	ServerName     string
-	RequireMTLS    bool
+	Enabled     bool
+	CertFile    string
+	KeyFile     string
+	CAFile      string
+	ServerName  string
+	RequireMTLS bool
 }
 
 // LoadConfigFromEnv reads TLS configuration from environment variables.

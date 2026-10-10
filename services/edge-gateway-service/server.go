@@ -24,4 +24,3 @@ func RegisterServiceWithPolicy(s *grpc.Server, policyClient accesscontrolv1.Acce
 	handler := grpchandler.NewServer(svc)
 	edgegatewayv1.RegisterEdgeGatewayServiceServer(s, handler)
 }
-

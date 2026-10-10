@@ -44,14 +44,14 @@ func (s *Server) ProcessTurnstileScan(ctx context.Context, req *edgegatewayv1.Pr
 	}
 
 	return &edgegatewayv1.ProcessTurnstileScanResponse{
-		IsAccessGranted:        res.IsAccessGranted,
-		Decision:               accesscontrolv1.AccessDecision(res.Decision),
-		MatchedEmployeeId:      res.MatchedEmployeeID,
-		MatchScore:             res.MatchScore,
-		Reason:                 res.Reason,
-		RelayStrikeDurationMs:  res.RelayStrikeDurationMs,
-		TotalLatencyMs:         res.TotalLatencyMs,
-		ProcessedOffline:       res.ProcessedOffline,
+		IsAccessGranted:       res.IsAccessGranted,
+		Decision:              accesscontrolv1.AccessDecision(res.Decision),
+		MatchedEmployeeId:     res.MatchedEmployeeID,
+		MatchScore:            res.MatchScore,
+		Reason:                res.Reason,
+		RelayStrikeDurationMs: res.RelayStrikeDurationMs,
+		TotalLatencyMs:        res.TotalLatencyMs,
+		ProcessedOffline:      res.ProcessedOffline,
 	}, nil
 }
 

@@ -7,7 +7,7 @@ import (
 
 var (
 	ErrInvalidDimensions = errors.New("image dimensions must be strictly positive")
-	ErrBufferMismatch     = errors.New("image buffer length does not match width * height")
+	ErrBufferMismatch    = errors.New("image buffer length does not match width * height")
 )
 
 // GrayImage represents an 8-bit grayscale image buffer.

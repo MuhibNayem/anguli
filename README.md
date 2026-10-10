@@ -57,7 +57,9 @@ starting a service with an empty one.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MASTER_KEY` | — (required) | 64-char hex key for the template vault |
+| `MASTER_KEY` | — (required) | 64-char hex key for the template vault (primary) |
+| `MASTER_KEY_ID` | `1` | Key id assigned to `MASTER_KEY` |
+| `MASTER_KEY_PREVIOUS` | — | `kid:hex,kid:hex,…` kept for decryption only during a rotation |
 | `API_GATEWAY_KEY` | — (required) | REST API credential |
 | `STORAGE_DRIVER` | `sqlite` | `sqlite` or `postgres` |
 | `STORAGE_DSN` | — | Postgres URL; ignored for SQLite |
@@ -101,6 +103,36 @@ against this encoder.
 statement of what this platform can and cannot do in production, with measured
 numbers. The older `docs/parity.md` and `docs/findings-audit-2026-10-09.md`
 contradict each other and are marked superseded.
+
+### Rotating the template encryption key
+
+`MASTER_KEY` protects every enrolled fingerprint. A leaked key exposes every
+person in the facility, so rotating it is not optional in any real deployment.
+The ciphertext envelope carries a key id, and the vault can hold several keys,
+so rotation does **not** require re-enrolling anyone:
+
+```sh
+# 1. Add the new key as decrypt-only alongside the current one.
+export MASTER_KEY=<new-64-hex>
+export MASTER_KEY_ID=2
+export MASTER_KEY_PREVIOUS=1:<old-64-hex>
+
+# 2. See how many templates still sit on the old key. Writes nothing.
+go run ./services/biometric-service/cmd/keyrotate -dry-run
+
+# 3. Migrate them. Every payload is decrypted, re-encrypted, verified by
+#    decrypting it back, and only then written.
+go run ./services/biometric-service/cmd/keyrotate -apply
+
+# 4. Re-run -dry-run until it reports nothing left.
+go run ./services/biometric-service/cmd/keyrotate -dry-run
+
+# 5. Only then drop MASTER_KEY_PREVIOUS.
+```
+
+Step 5 must be last. Removing a key while templates still reference it makes
+those templates permanently unreadable — the encrypted data is the only copy,
+so there is no recovery path.
 
 ### Inter-service gRPC transport
 

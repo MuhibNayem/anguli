@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
@@ -35,24 +34,22 @@ func main() {
 		port = "50051"
 	}
 
-	masterKeyHex := os.Getenv("MASTER_KEY")
-	if masterKeyHex == "" {
-		fmt.Fprintf(os.Stderr, "FATAL: MASTER_KEY environment variable is mandatory and missing\n")
-		os.Exit(1)
-	}
-
-	var keyBytes []byte
-	if len(masterKeyHex) == 64 {
-		var hexErr error
-		keyBytes, hexErr = hex.DecodeString(masterKeyHex)
-		if hexErr != nil {
-			fmt.Fprintf(os.Stderr, "FATAL: MASTER_KEY hex decoding failed: %v\n", hexErr)
-			os.Exit(1)
-		}
-	} else if len(masterKeyHex) == 32 {
-		keyBytes = []byte(masterKeyHex)
-	} else {
-		fmt.Fprintf(os.Stderr, "FATAL: MASTER_KEY must be 64 hex characters or 32 raw bytes (got %d characters)\n", len(masterKeyHex))
+	// The keyring, not a single key. MASTER_KEY is the primary used for new
+	// encryptions; MASTER_KEY_PREVIOUS lists keys kept for decryption only.
+	//
+	// Loading just one key made rotation impossible: a compromised template
+	// key otherwise exposes every enrolled person in the facility, and the
+	// only remedy was re-enrolling all of them. With previous keys present the
+	// service reads records written under any previously-active key while
+	// writing new ones under the current primary, and the keyrotate command
+	// migrates the backlog in place.
+	//
+	// Every failure here is fatal. A service that started with a silently
+	// truncated keyring would fail to decrypt templates much later, and the
+	// error would name a record rather than a configuration mistake.
+	vault, err := crypto.LoadVaultFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -74,14 +71,12 @@ func main() {
 	defer cleanupTel(context.Background())
 
 	logger := tel.Logger
-	logger.InfoContext(ctx, "starting biometric-service", slog.String("port", port))
-
-	// Dependency Injection with validated 32-byte cryptographic key
-	vault, err := crypto.NewVault(keyBytes)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to initialize vault", slog.String("error", err.Error()))
-		os.Exit(1)
-	}
+	logger.InfoContext(ctx, "starting biometric-service",
+		slog.String("port", port),
+		// Which keys are loaded, and which is primary. Never the keys
+		// themselves - this line goes to whatever aggregates the logs.
+		slog.String("keyring", vault.KeyringDescription()),
+	)
 
 	// Durable storage. SQLite is the default so a single node needs no extra
 	// service; set STORAGE_DRIVER=postgres for a shared multi-instance store.

@@ -35,4 +35,3 @@ type RevocationRecord struct {
 	Reason        string
 	PriorPayload  []byte
 }
-

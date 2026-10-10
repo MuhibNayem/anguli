@@ -18,9 +18,10 @@ import (
 
 	biometricsv1 "finger-scanner/pkg/api/v1/biometrics"
 	"finger-scanner/pkg/biometrics/crypto"
+	"finger-scanner/pkg/store"
 	"finger-scanner/pkg/telemetry"
 	grpchandler "finger-scanner/services/biometric-service/internal/adapters/grpc"
-	"finger-scanner/services/biometric-service/internal/adapters/memory"
+	"finger-scanner/services/biometric-service/internal/adapters/sqlstore"
 	"finger-scanner/services/biometric-service/internal/service"
 )
 
@@ -81,7 +82,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	repo := memory.NewInMemoryRepository()
+	// Durable storage. SQLite is the default so a single node needs no extra
+	// service; set STORAGE_DRIVER=postgres for a shared multi-instance store.
+	// The in-memory adapter remains available for tests and local experiments
+	// via STORAGE_DRIVER=memory.
+	st, err := store.Open(ctx, store.FromEnv())
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to open storage", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	defer func() { _ = st.Close() }()
+
+	logger.InfoContext(ctx, "storage ready",
+		slog.String("driver", string(st.Driver())),
+	)
+
+	repo, err := sqlstore.New(st)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to build repository", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
 	biometricSvc := service.NewBiometricService(repo, vault, logger)
 	grpcServerHandler := grpchandler.NewServer(biometricSvc)
 

@@ -33,6 +33,13 @@ type Config struct {
 
 // NewServiceClients establishes gRPC connections to downstream microservices.
 func NewServiceClients(ctx context.Context, cfg Config, logger *slog.Logger) (*ServiceClients, error) {
+	// Default the logger rather than assuming one is supplied. A nil
+	// *slog.Logger here panicked on the very first log line, which turns a
+	// wiring mistake into a crash during startup.
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}

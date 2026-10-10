@@ -80,6 +80,15 @@ starting a service with an empty one.
 | `pkg/biometrics/cbeff` | ISO/IEC 19785-1 | CBEFF Biometric Information Record container, so either of the above can be exchanged with a third-party PACS. |
 | `pkg/biometrics/dataset` | — | Loader and evaluator for real fingerprint datasets (FAR/FRR/EER/ROC). |
 
+`pkg/biometrics/cbeff` also implements the **PIV patron format** header from
+NIST SP 800-76-2: the fixed 88-byte header, all 14 mandatory fields, and the
+INCITS fingerprint modality values. Fingerprint data under PIV uses format
+owner `0x001B` (INCITS M1) — **not** the `0x0101` (ISO/IEC JTC 1/SC 37) owner
+used by the ISO/IEC 19794-x records above; they are different registries and a
+reader will reject the wrong one. The CBEFF signature block is not yet
+implemented, so records produced this way are not yet PIV-conformant — see
+`docs/production-status.md`.
+
 CBEFF wraps a data block and identifies it: format owner `0x0101` (ISO/IEC JTC
 1/SC 37), format type `0x0001` for a 19794-2 minutiae record and `0x0007` for
 a 19794-4 image, biometric type `0x08` for finger. Those identifiers are

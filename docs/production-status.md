@@ -43,6 +43,7 @@ should not be cited as such.
 | Anti-passback concurrency | Production-ready | Check and commit are one atomic unit: `pg_advisory_xact_lock` on PostgreSQL, keyed mutex plus transaction on SQLite. Concurrent-entry tests assert exactly one grant. |
 | ISO/IEC 19794-2 and 19794-4 codecs | Verified against the standard | Field layouts transcribed from the primary text, with spec-stated values asserted in tests rather than only round-tripped. |
 | CBEFF container (ISO/IEC 19785-1) | Implemented | Fingerprint minutiae and image records can be wrapped and unwrapped with the format owner and type identifiers the standard assigns. |
+| PIV CBEFF header (NIST SP 800-76-2) | Header implemented | The 88-byte PIV patron format header, with the INCITS modality values Table 15 assigns and field values pinned to the standard's own worked example. The CBEFF signature block is **not** implemented — see below. |
 | Circuit breaker and overload shedding | Production-ready | Breakers gate every downstream RPC; the reject fast path is lock-free. |
 
 ## What is not production-ready
@@ -89,11 +90,41 @@ sensing per ISO/IEC 30107-3 — this is a hardware and algorithm question, not
 something that can be closed in software, and it is the single largest gap
 between this platform and an enterprise one.
 
-### No MINEX III support
+### Reader-side MINEX is not implemented
+
+**A correction.** An earlier version of this document described "MINEX III" as
+the standard access-control *reader protocol*. That conflated two different
+things that share a name:
+
+- **MINEX III (NIST)** is a *test and API framework* for fingerprint template
+  generation and matching, defined against **INCITS 378** templates for the US
+  PIV programme. It is not a reader protocol and is not what a turnstile
+  speaks.
+- **SIA MINEX (SIA 7243)** is the reader-side record format used in physical
+  access control, and it is what a real turnstile deployment needs.
 
 The platform has a pure-Go `fprintd` D-Bus driver for laptop sensors and an
-OSDP v2.2 codec for readers. MINEX III, the standard access-control reader
-protocol, is not implemented. Any real turnstile deployment needs it.
+OSDP v2.2 codec for readers, which together cover a reader that speaks OSDP.
+SIA MINEX reader records and the associated host protocol are **not**
+implemented, so a reader that requires MINEX cannot be deployed against this
+platform as it stands.
+
+### The PIV header is implemented but unsigned
+
+`pkg/biometrics/cbeff` implements the PIV patron format header from NIST SP
+800-76-2 Table 14: all 14 mandatory fields, the 88-byte layout, the INCITS
+fingerprint modality values (format owner `0x001B`, format type `0x0201`,
+biometric type `0x000008`), and the binary `YYYYMMDDhhmmssZ` date encoding.
+
+The **CBEFF_SIGNATURE_BLOCK is not implemented**. SP 800-76-2 requires a CMS
+external signature (RFC 5652) over the header concatenated with the biometric
+record, with a two-phase computation because the signature length feeds back
+into the header field it occupies. That needs a certificate.
+
+Consequence to be aware of: the header's security-options field carries the
+mandatory PIV value `0x0D`, which *asserts* a signature. A record produced by
+this package is therefore **not yet PIV-conformant** — it must be signed, or
+that field must be rewritten, before it goes near a real card.
 
 ### Interoperability is container-level only
 

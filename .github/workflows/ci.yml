@@ -64,26 +64,48 @@ jobs:
 
       # Enforce a per-package coverage floor.
       #
-      # Only packages that actually HAVE test files are held to the floor.
-      # `-coverprofile` makes go test report 0.0% for a package with no tests
-      # rather than "[no test files]", so the two cannot be told apart from the
-      # test output alone - asking `go list` which packages have TestGoFiles is
-      # the reliable way to separate them. Counting untested packages as 0%
-      # dragged the aggregate to 45.8% for reasons unrelated to any
-      # regression, which makes a gate that fails on its first run useless.
-      # They are reported as a warning so the gap stays visible.
+      # Two things this deliberately does NOT do:
+      #  - It does not count packages with no test file as 0%. With
+      #    -coverprofile go test reports 0.0% for an untested package rather
+      #    than "[no test files]", so the two cannot be told apart from the
+      #    test output. Folding them in dragged the aggregate to 45.8% for
+      #    reasons unrelated to any regression. `go list` answers which
+      #    packages actually have TestGoFiles.
+      #  - It does not use `go tool cover -func | grep <pkg> | tail -1`.
+      #    That greps per-FUNCTION lines and returns the last function's
+      #    percentage, not the package's, which reported a healthy 80%
+      #    package as 0.0%. Coverage is summed from the profile directly.
       - name: Enforce coverage floor
         run: |
+          set -uo pipefail
           floor=60
+
           go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' \
             ./pkg/... ./services/... | grep -v '^$' | sort > tested-pkgs.txt
           echo "Holding $(wc -l < tested-pkgs.txt) tested packages to a ${floor}% floor."
 
+          # Per-package coverage straight from the profile. Each line is
+          # "<pkg>/<file>.go:<range> <numStatements> <count>", where count > 0
+          # means covered. Group by directory because the package is the
+          # directory, not the file.
+          awk '
+            {
+              pos = index($0, ".go:")
+              if (pos == 0) next
+              dir = substr($0, 1, pos + 2)
+              sub(/\/[^\/]*$/, "", dir)
+              total[dir] += $2
+              if ($3 > 0) covered[dir] += $2
+            }
+            END {
+              for (p in total)
+                printf "%s %.1f\n", p, (total[p] > 0 ? 100 * covered[p] / total[p] : 0)
+            }
+          ' coverage.out | sort > pkg-coverage.txt
+
           fail=0
           while read -r pkg; do
-            pct=$(go tool cover -func=coverage.out 2>/dev/null \
-              | grep -F "$pkg" \
-              | awk '{gsub(/%/,"",$NF); print $NF}' | tail -1)
+            pct=$(grep -F "$pkg " pkg-coverage.txt | head -1 | awk '{print $2}')
             [ -z "$pct" ] && continue
             if awk -v p="$pct" -v f="$floor" 'BEGIN{exit !(p+0 < f)}'; then
               echo "::error::$pkg is at ${pct}%, below the ${floor}% floor"
@@ -94,15 +116,11 @@ jobs:
           if [ "$fail" -ne 0 ]; then
             exit 1
           fi
+          echo "All tested packages meet the ${floor}% floor."
 
-          total=$(go tool cover -func=coverage.out | awk '/^total:/{gsub(/%/,"",$3); print $3}')
-          echo "Total coverage across all packages: ${total}%"
-          untested=$(go list ./pkg/... ./services/... | sort \
-            | comm -23 - tested-pkgs.txt)
-          if [ -n "$untested" ]; then
-            echo "::warning::No test files (not held to the floor):"
-            echo "$untested" | sed 's/^/  /'
-          fi
+          echo "::warning::Packages with no test files (not held to the floor):"
+          go list ./pkg/... ./services/... | sort \
+            | comm -23 - tested-pkgs.txt | sed 's/^/  /'
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
@@ -184,6 +202,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # Validate the compose file before building anything from it.
+      #
+      # The committed compose file failed `docker compose config` for its whole
+      # life because of a colon inside a ${VAR:?message} interpolation and
+      # unquoted environment entries. `docker compose up` would have failed
+      # exactly the same way, so nothing caught it until this was run
+      # deliberately. Checking the config is cheap; discovering the deploy is
+      # un-runnable during an incident is not.
+      - name: Validate docker-compose
+        env:
+          MASTER_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+          API_GATEWAY_KEY: ci-placeholder-not-a-real-key
+        run: |
+          docker compose -f deploy/docker-compose.yml config -q
+          echo "compose config is valid"
 
       - uses: docker/setup-buildx-action@v3
 

@@ -16,12 +16,12 @@ import (
 
 // ServiceClients bundles the gRPC client connections.
 type ServiceClients struct {
-	BiometricsClient    biometricsv1.BiometricsServiceClient
-	AccessPolicyClient  accesscontrolv1.AccessPolicyServiceClient
-	EdgeGatewayClient   edgegatewayv1.EdgeGatewayServiceClient
-	bioConn             *grpc.ClientConn
-	policyConn          *grpc.ClientConn
-	edgeConn            *grpc.ClientConn
+	BiometricsClient   biometricsv1.BiometricsServiceClient
+	AccessPolicyClient accesscontrolv1.AccessPolicyServiceClient
+	EdgeGatewayClient  edgegatewayv1.EdgeGatewayServiceClient
+	bioConn            *grpc.ClientConn
+	policyConn         *grpc.ClientConn
+	edgeConn           *grpc.ClientConn
 }
 
 // Config specifies the target addresses for downstream microservices.
@@ -115,4 +115,3 @@ func (c *ServiceClients) CheckHealth(ctx context.Context) (map[string]string, bo
 
 	return results, allHealthy
 }
-

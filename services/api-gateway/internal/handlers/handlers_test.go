@@ -22,14 +22,14 @@ type mockEdgeGatewayClient struct {
 
 func (m *mockEdgeGatewayClient) ProcessTurnstileScan(ctx context.Context, in *edgegatewayv1.ProcessTurnstileScanRequest, opts ...grpc.CallOption) (*edgegatewayv1.ProcessTurnstileScanResponse, error) {
 	return &edgegatewayv1.ProcessTurnstileScanResponse{
-		IsAccessGranted:        true,
-		Decision:               accesscontrolv1.AccessDecision_ACCESS_DECISION_GRANTED,
-		MatchedEmployeeId:      in.EmployeeId,
-		MatchScore:             95.0,
-		Reason:                 "Access granted",
-		RelayStrikeDurationMs:  2500,
-		TotalLatencyMs:         45,
-		ProcessedOffline:       false,
+		IsAccessGranted:       true,
+		Decision:              accesscontrolv1.AccessDecision_ACCESS_DECISION_GRANTED,
+		MatchedEmployeeId:     in.EmployeeId,
+		MatchScore:            95.0,
+		Reason:                "Access granted",
+		RelayStrikeDurationMs: 2500,
+		TotalLatencyMs:        45,
+		ProcessedOffline:      false,
 	}, nil
 }
 

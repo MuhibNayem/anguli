@@ -188,11 +188,11 @@ func (h *GatewayHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := h.clients.BiometricsClient.VerifyFingerprint(r.Context(), &biometricsv1.VerifyFingerprintRequest{
-		EmployeeId:         req.EmployeeID,
-		Position:           biometricsv1.FingerPosition(req.Position),
-		ProbeImageRawGray:  pix,
-		Width:              width,
-		Height:             height,
+		EmployeeId:        req.EmployeeID,
+		Position:          biometricsv1.FingerPosition(req.Position),
+		ProbeImageRawGray: pix,
+		Width:             width,
+		Height:            height,
 	})
 	if err != nil {
 		h.writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -264,15 +264,15 @@ func (h *GatewayHandler) HandleDoorScan(w http.ResponseWriter, r *http.Request) 
 
 	// Call edge gateway turnstile controller (executes matching, policy evaluation, and relay strike)
 	edgeResp, err := h.clients.EdgeGatewayClient.ProcessTurnstileScan(r.Context(), &edgegatewayv1.ProcessTurnstileScanRequest{
-		TurnstileId:        req.TurnstileID,
-		ZoneId:             req.ZoneID,
-		Direction:          accesscontrolv1.DoorDirection(req.Direction),
-		EmployeeId:         req.EmployeeID,
-		CredentialCardId:   req.CredentialCardID,
-		ProbeImageRawGray:  probePix,
-		ImageWidth:         width,
-		ImageHeight:        height,
-		ScanTimestampUnix:  time.Now().Unix(),
+		TurnstileId:       req.TurnstileID,
+		ZoneId:            req.ZoneID,
+		Direction:         accesscontrolv1.DoorDirection(req.Direction),
+		EmployeeId:        req.EmployeeID,
+		CredentialCardId:  req.CredentialCardID,
+		ProbeImageRawGray: probePix,
+		ImageWidth:        width,
+		ImageHeight:       height,
+		ScanTimestampUnix: time.Now().Unix(),
 	})
 	if err != nil {
 		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "edge gateway scan error: " + err.Error()})
@@ -406,4 +406,3 @@ func generateSyntheticPrint(w, h int, seed string, noiseFactor int) []byte {
 	}
 	return pix
 }
-

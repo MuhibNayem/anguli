@@ -90,6 +90,27 @@ func main() {
 	}
 	metrics := resilience.NewMetrics()
 
+	// Per-dependency circuit breakers with retry and jittered backoff. These
+	// are separate per service so one sick dependency cannot disconnect the
+	// gateway from the two that are healthy.
+	breakers, err := clients.NewBreakers(clients.BreakerConfig{})
+	if err != nil {
+		logger.ErrorContext(ctx, "invalid circuit breaker configuration", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				breakers.Observe(metrics)
+			}
+		}
+	}()
+
 	logger.InfoContext(ctx, "overload protection enabled",
 		slog.Int("max_concurrent_requests", limiter.Limit()),
 		slog.Int("admission_grace_ms", resilience.ParseIntDefault(os.Getenv("ADMISSION_GRACE_MS"), 250)),

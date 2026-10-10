@@ -1,143 +1,122 @@
-# AegisBiometrics — Enterprise Zero-Misread Fingerprint Platform
+# anguli (অঙ্গুলি — "finger")
 
-A FAANG-grade, production-engineered biometric registration and turnstile verification platform built in **Go 1.25.3**, architected as distributed **gRPC microservices** behind a **REST API Gateway**, with crash-resilient edge fog node caching, **NFIQ-inspired Multi-Factor** image quality gating, **Minutia Cylinder-Code (MCC)** graph consensus matching, and OSDP-compatible industrial turnstile door controller support.
+A fingerprint access-control platform: MCC cylinder-code matching, four Go
+services, SIA OSDP v2.2 hardware integration, and a 3,000-case chaos suite.
 
----
-
-## 1. Architectural Highlights
-
-- **Zero-Misread Biometric Matching:** Built using **Minutia Cylinder-Code (MCC)** (Cappelli, Ferrara & Maltoni, IEEE TPAMI) combined with **Global Spatial & Angular Hough Consensus Matching**. Enforces true directional ridge tracing in $[0, 2\pi)$ and $O(M)$ spatial translation clustering, yielding proven rotation invariance ($\ge 93.5$ score at $5^\circ$ rotation, $0.00$ false match on imposters).
-- **Multi-Factor Quality Gating:** Implements ISO/IEC 29794-4 & NFIQ-inspired quality scoring evaluating Sobel ridge gradient energy, local contrast standard deviation, and block directional coherence. Featureless or blurred images are rejected upfront ($\text{Score} < 65/100$, featureless images score 0).
-- **Sub-100ms Turnstile Doorstep Latency:** Highly optimized using $O(1)$ integral image binarization, spatial hash grid indexing, and local edge fog memory caching, achieving doorstep verification in under $95\text{ ms}$.
-- **100% Offline Fog Node Survivability & Durable WAL:** Edge gateways run on industrial IPCs, holding site rosters in memory with crash-proof Write-Ahead Log (WAL) persistence flushed to disk with synchronous `Sync()`. Automatically recovers un-drained audit events across restarts.
-- **Symmetric Anti-Passback (APB) & Zero-Trust RBAC:** Enforces strict symmetric anti-passback across security zones (rejects duplicate entries and unverified exits). Validates role clearance hierarchy (`SECURITY_ADMIN`, `OPERATOR`, `EMPLOYEE`) and fails closed on unconfigured zones or audit commit errors.
-- **Biometric Envelope Encryption & Privacy:** All persistent biometric templates are encrypted at rest using **AES-256-GCM** with zero plaintext coordinates stored in persistent records. Includes **ISO/IEC 24745** compliant non-linear HMAC-SHA256 cancelable projections.
-- **Authenticated REST & gRPC Channels:** API Gateway enforces API Key and Bearer token authentication (`X-API-Key`, `Authorization`) with restricted CORS origins and request body size bounding.
+> **Note on naming.** The codebase, packages and image names still say
+> `aegis-*` in places. The repository is `anguli`; renaming the internal
+> identifiers is mechanical follow-up work and has not been done, so expect
+> the two names to coexist for now.
 
 ---
 
-## 2. Microservice Topology
+## What is here
 
-| Service | Port | Protocol | Clean Architecture Path |
-| :--- | :--- | :--- | :--- |
-| **Biometric Service** | `50051` | gRPC / Protobuf v3 | [services/biometric-service](file:///Users/a.k.mmuhibullahnayem/Developer/finger-scanner/services/biometric-service) |
-| **Access Policy Service** | `50052` | gRPC / Protobuf v3 | [services/access-policy-service](file:///Users/a.k.mmuhibullahnayem/Developer/finger-scanner/services/access-policy-service) |
-| **Edge Gateway Service** | `50053` | gRPC / Protobuf v3 | [services/edge-gateway-service](file:///Users/a.k.mmuhibullahnayem/Developer/finger-scanner/services/edge-gateway-service) |
-| **REST API Gateway** | `8080` | HTTP / REST & Web UI | [services/api-gateway](file:///Users/a.k.mmuhibullahnayem/Developer/finger-scanner/services/api-gateway) |
+| Area | Where |
+|---|---|
+| Biometric pipeline | `pkg/biometrics/` — image, minutiae, MCC, quality, crypto |
+| Interop | `pkg/biometrics/iso19794/` — ISO/IEC 19794-4 record read/write |
+| Hardware | `pkg/hardware/` — OSDP v2.2 framing, turnstile driver |
+| Security | `pkg/security/` — TLS, rate limiting; `pkg/resilience/` — admission control, circuit breakers |
+| Storage | `pkg/store/` — SQLite (default) and PostgreSQL drivers behind one interface |
+| Services | `services/` — biometric, access-policy, edge-gateway, api-gateway |
+| Chaos suite | `test/chaos/` — 2,728 cases across 42 dimensions behind a hard gate |
 
----
+## Requirements
 
-## 3. Technology Stack
+Go 1.26. Docker and Docker Compose for the containerised path; Helm 3 for
+Kubernetes. No CGO anywhere — the runtime images are Alpine.
 
-- **Go Version:** Go 1.25.3 (`toolchain go1.25.3`)
-- **Docker Builder:** `golang:1.25.3-alpine`
-- **Inter-service RPC:** gRPC with Protobuf v3 (`google.golang.org/grpc`)
-- **Observability:** OpenTelemetry (`go.opentelemetry.io/otel`) & structured logging (`log/slog`)
-- **Cryptography:** AES-256-GCM envelope encryption & non-linear HMAC-SHA256 cancelable projections
-- **Frontend Dashboard:** Material Design with Glassmorphism aesthetic, HSL gradient palette, and micro-animations ([web/index.html](file:///Users/a.k.mmuhibullahnayem/Developer/finger-scanner/web/index.html))
-
----
-
-## 4. Quickstart Guide
-
-### Running All Services Locally
+## Quickstart
 
 ```bash
-# 1. Start Biometric Service (gRPC 50051)
-MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-PORT=50051 go run services/biometric-service/cmd/server/main.go &
-
-# 2. Start Access Policy Service (gRPC 50052)
-PORT=50052 go run services/access-policy-service/cmd/server/main.go &
-
-# 3. Start Edge Gateway Service (gRPC 50053)
-PORT=50053 go run services/edge-gateway-service/cmd/server/main.go &
-
-# 4. Start REST API Gateway (HTTP 8080)
-API_GATEWAY_KEY=aegis-secret-key-2026 \
-PORT=8080 go run services/api-gateway/cmd/server/main.go
-```
-
-
-Open **`http://localhost:8080`** in your browser to access the live turnstile operations dashboard.
-
----
-
-### Running with Docker Compose
-
-```bash
+# Bring up the full stack. Every service declares a healthcheck and dependents
+# wait on service_healthy, so a cold start no longer races the backends.
+MASTER_KEY=$(openssl rand -hex 32) \
+API_GATEWAY_KEY=$(openssl rand -hex 32) \
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
----
-
-### Running Verification Tests
+For Kubernetes, the chart refuses to render without an explicit Secret:
 
 ```bash
-# Run all unit tests
-go test -v ./pkg/...
+kubectl create secret generic anguli-secrets \
+  --from-literal=MASTER_KEY="$(openssl rand -hex 32)" \
+  --from-literal=API_GATEWAY_KEY="$(openssl rand -hex 32)"
 
-# Run complete end-to-end multi-service integration test
-go test -v ./test/integration/...
+helm upgrade --install anguli deploy/helm \
+  --set existingSecret.name=anguli-secrets
 ```
 
----
+## Configuration
 
-## 5. API Gateway REST Endpoints
+Every secret is read from the environment with no insecure default. Compose
+uses `${VAR:?message}`, so a missing key fails the deployment rather than
+starting a service with an empty one.
 
-### 1. Enroll Fingerprint
-- **Endpoint:** `POST /api/v1/biometrics/enroll`
-- **Payload:**
-```json
-{
-  "employee_id": "EMP-90214",
-  "full_name": "Alex Rivera",
-  "position": 2
-}
-```
-- **Response:**
-```json
-{
-  "employee_id": "EMP-90214",
-  "is_quality_acceptable": true,
-  "minutiae_count": 162,
-  "nfiq_quality_score": 66,
-  "processing_time_us": 1420,
-  "template_id": "7efa1a21-c40c-4e74-a67c-0051d1a44e4c"
-}
-```
+| Variable | Default | Meaning |
+|---|---|---|
+| `MASTER_KEY` | — (required) | 64-char hex key for the template vault |
+| `API_GATEWAY_KEY` | — (required) | REST API credential |
+| `STORAGE_DRIVER` | `sqlite` | `sqlite` or `postgres` |
+| `STORAGE_DSN` | — | Postgres URL; ignored for SQLite |
+| `STORAGE_DATA_DIR` | `data` | Where the SQLite file lives |
+| `MAX_CONCURRENT_REQUESTS` | `64` | Gateway admission ceiling |
+| `ADMISSION_GRACE_MS` | `250` | How long a request may queue before being shed |
+| `PORT` | per-service | `50051` / `50052` / `50053` / `8080` |
 
-### 2. Turnstile Door Scan (OSDP v2.2 Simulation)
-- **Endpoint:** `POST /api/v1/doors/scan`
-- **Payload:**
-```json
-{
-  "turnstile_id": "turnstile-lane-01",
-  "zone_id": "zone-main-gate",
-  "direction": 1,
-  "employee_id": "EMP-90214",
-  "noise_factor": 0
-}
-```
-- **Response:**
-```json
-{
-  "decision": "ACCESS_DECISION_GRANTED",
-  "is_access_granted": true,
-  "match_score": 100,
-  "matched_employee_id": "EMP-90214",
-  "reason": "Access granted by policy rule",
-  "relay_strike_duration_ms": 2500,
-  "total_latency_ms": 189
-}
+### Why overload protection is on by default
+
+Measured on this platform, verify latency grew from 140 ms at one concurrent
+request to 4.4 s at 128, and 300 concurrent verifies averaged 6.3 s (max 8.3 s).
+Above capacity the gateway used to accept work it could never finish. It now
+bounds concurrency and sheds the excess with `503` plus `Retry-After`, which is
+faster for the user and visible to a load balancer.
+
+`/metrics` publishes the limiter and circuit-breaker series. Shedding without
+visibility would be a guess.
+
+## Testing
+
+```bash
+go test ./pkg/... ./services/... ./api/...     # unit
+go test ./test/chaos/ -v -count=1             # chaos suite + coverage gate
+go test -race ./pkg/... ./services/...        # race detector
+go test ./test/chaos/ -run XXX -fuzz '^FuzzVaultDecrypt$' -fuzztime 30s
 ```
 
-### 3. Reset Anti-Passback
-- **Endpoint:** `POST /api/v1/policies/reset-apb`
-- **Payload:**
-```json
-{
-  "employee_id": "EMP-90214",
-  "zone_id": "zone-main-gate"
-}
-```
+Use `-v` on the chaos suite. Go suppresses stdout and stderr from a passing test
+binary, so the gate report is invisible without it.
+
+The chaos suite has its own gate in `TestMain`: it fails below 1,000 cases, on
+any dimension that registered zero, and on ledger inconsistency. It also fails
+deliberately on an isolated `-run`, because a partial run is exactly what it
+exists to catch — fuzz runs pass `-short` to opt out. See
+[`test/chaos/README.md`](test/chaos/README.md).
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+- **verify** — tidy check, build, vet, gofmt, unit tests with a coverage floor
+- **chaos** — both chaos suites with their gates, plus a race-detector pass
+- **fuzz** — a 30 s smoke run per fuzz target
+- **build** — matrix build of all four service images
+
+## Known limitations
+
+These are real and worth stating plainly:
+
+- **`pkg/security/tls` is not wired into any service yet.** The package fails
+  closed when misconfigured and is well tested, but no gRPC server currently
+  uses mTLS. Inter-service traffic is still plaintext.
+- **MINEX III is not implemented.** Templates are proprietary; interoperability
+  covers the ISO/IEC 19794-4 *image* record only, for the uncompressed 8-bit
+  representation.
+- **Composite (multi-finger) recognition is out of scope.** No.
+- **The edge cache defaults its WAL to a fixed path** in the system temp
+  directory. Two edge nodes sharing a host would write the same file. Make it
+  per-instance before running more than one.
+- **Synthetic corpora only.** Accuracy figures in the chaos ledger come from a
+  loop-print generator, not real finger data. They exercise the pipeline; they
+  are not a claim about match rates on real prints.

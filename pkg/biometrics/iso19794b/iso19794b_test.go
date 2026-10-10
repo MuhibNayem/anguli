@@ -27,26 +27,102 @@ func sample(n int) []MinutiaFormat {
 			Type:        typ,
 			X:           uint16(r.Intn(maxCoord + 1)),
 			Y:           uint16(r.Intn(maxCoord + 1)),
-			Quality:     uint8(r.Intn(256)),
+			Quality:     uint8(1 + r.Intn(100)),
 			Orientation: r.Float64() * 2 * math.Pi,
 		})
 	}
 	return out
 }
 
-// TestMinutiaRecordMatchesTheStandard pins the six-byte record layout to the
-// standard's own normative statements, offset by offset. This is the test that
-// matters most in the package: a layout bug here produces records that parse
-// cleanly and match nothing.
+// TestRecordHeaderMatchesTheStandard pins the general header offset by offset.
 //
-// The standard specifies, in terms:
-//   - x occupies the lower fourteen bits of the first two bytes
-//   - y occupies the lower fourteen bits of the third and fourth byte
-//   - '01' is a ridge ending, '10' a bifurcation (2-bit type)
-//   - the angle is 1.40625 (360/256) degrees per least significant bit
+// This is the test that catches the mistake that actually mattered: the 19794-2
+// header is NOT laid out like the 19794-4 header that package iso19794 parses,
+// even though both are 24 bytes. 19794-2 puts the certification flag and the
+// 12-bit capture device ID at [12:14]; 19794-4 puts image height there.
+func TestRecordHeaderMatchesTheStandard(t *testing.T) {
+	raw, err := Build(640, 480, 2, 0, 90, []MinutiaFormat{
+		{Type: 1, X: 100, Y: 200, Quality: 80, Orientation: 0},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	h := raw[:RecordHeaderLen]
+
+	if got, want := h[0:4], []byte("FMR\x00"); !bytes.Equal(got, want) {
+		t.Errorf("identifier = %q; want %q. The standard specifies the ASCII string FMR, not a numeric type code.", got, want)
+	}
+	if got, want := h[4:8], []byte(" 20\x00"); !bytes.Equal(got, want) {
+		t.Errorf("version = %q; want %q. The standard specifies the ASCII string \" 20\", not the integer 0x02000000.", got, want)
+	}
+	if got := binary.BigEndian.Uint32(h[8:12]); int(got) != len(raw) {
+		t.Errorf("record length = %d; want %d", got, len(raw))
+	}
+	// Certification flag is the high nibble of [12]; the device ID is the low
+	// 12 bits spanning [12:14].
+	if h[12]&0xF0 != 0 {
+		t.Errorf("certification nibble = 0x%X; want 0 for an uncertified record", h[12]&0xF0)
+	}
+	if got := uint16(h[12]&0x0F)<<8 | uint16(h[13]); got != 0 {
+		t.Errorf("capture device ID = %d; want 0 (unreported)", got)
+	}
+	if got := binary.BigEndian.Uint16(h[14:16]); int(got) != 640 {
+		t.Errorf("width at [14:16] = %d; want 640. Note 19794-4 puts HEIGHT here.", got)
+	}
+	if got := binary.BigEndian.Uint16(h[16:18]); int(got) != 480 {
+		t.Errorf("height at [16:18] = %d; want 480. Note 19794-4 puts width and a resolution-units byte here.", got)
+	}
+	if got := binary.BigEndian.Uint16(h[18:20]); got != 500 {
+		t.Errorf("X resolution at [18:20] = %d; want 500", got)
+	}
+	if got := binary.BigEndian.Uint16(h[20:22]); got != 500 {
+		t.Errorf("Y resolution at [20:22] = %d; want 500", got)
+	}
+	if h[22] != 1 {
+		t.Errorf("number of finger views at [22] = %d; want 1", h[22])
+	}
+	if h[23] != 0 {
+		t.Errorf("reserved byte at [23] = %d; want 0", h[23])
+	}
+	if RecordHeaderLen != 24 {
+		t.Errorf("RecordHeaderLen = %d; the standard fixes the header at 24 bytes", RecordHeaderLen)
+	}
+}
+
+// TestFingerHeaderMatchesTheStandard pins the per-finger header, which the
+// standard fixes at FOUR bytes with five fields.
+func TestFingerHeaderMatchesTheStandard(t *testing.T) {
+	raw, err := Build(200, 200, 6, 1, 75, []MinutiaFormat{
+		{Type: 1, X: 5, Y: 6, Quality: 90, Orientation: 0},
+		{Type: 2, X: 7, Y: 8, Quality: 90, Orientation: 0},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	fh := raw[RecordHeaderLen:][:FingerHeaderLen]
+
+	if FingerHeaderLen != 4 {
+		t.Errorf("FingerHeaderLen = %d; the standard fixes the finger header at 4 bytes", FingerHeaderLen)
+	}
+	if fh[0] != 6 {
+		t.Errorf("finger position = %d; want 6 (left thumb)", fh[0])
+	}
+	if got := fh[1] >> 4; got != 0 {
+		t.Errorf("view number (high nibble) = %d; want 0 for a single view", got)
+	}
+	if got := fh[1] & 0x0F; got != 1 {
+		t.Errorf("impression type (low nibble) = %d; want 1 (live scan rolled)", got)
+	}
+	if fh[2] != 75 {
+		t.Errorf("finger image quality = %d; want 75", fh[2])
+	}
+	if fh[3] != 2 {
+		t.Errorf("number of minutiae = %d; want 2. The standard uses a ONE byte count.", fh[3])
+	}
+}
+
+// TestMinutiaRecordMatchesTheStandard pins the six-byte minutia record.
 func TestMinutiaRecordMatchesTheStandard(t *testing.T) {
-	// Angle 0 rad = 0 degrees = LSB 0.
-	// Angle pi/2 rad = 90 degrees = LSB 64, since 90/1.40625 = 64 exactly.
 	cases := []struct {
 		name              string
 		m                 MinutiaFormat
@@ -55,41 +131,39 @@ func TestMinutiaRecordMatchesTheStandard(t *testing.T) {
 		quality           uint8
 	}{
 		{
-			// '01' in the top two bits; both coordinates zero.
 			name:     "ridge ending at origin",
-			m:        MinutiaFormat{Type: 1, X: 0, Y: 0, Quality: 0, Orientation: 0},
-			firstTwo: 0x4000,
+			m:        MinutiaFormat{Type: 1, X: 0, Y: 0, Quality: 1, Orientation: 0},
+			firstTwo: 0x4000, // '01' in the top two bits
 			nextTwo:  0x0000,
 			angle:    0,
-			quality:  0,
+			quality:  1,
 		},
 		{
-			// '10' in the top two bits, x and y both at the 14-bit maximum,
-			// with the two reserved bits above y left at zero.
-			name:     "bifurcation, max x and y",
-			m:        MinutiaFormat{Type: 2, X: maxCoord, Y: maxCoord, Quality: 255, Orientation: 0},
-			firstTwo: 0x8000 | maxCoord,
-			nextTwo:  0x0000 | maxCoord,
+			name:     "bifurcation at the coordinate maximum",
+			m:        MinutiaFormat{Type: 2, X: maxCoord, Y: maxCoord, Quality: 100, Orientation: 0},
+			firstTwo: 0x8000 | maxCoord, // '10'
+			nextTwo:  0x0000 | maxCoord, // reserved bits zero
 			angle:    0,
-			quality:  255,
+			quality:  100,
 		},
 		{
-			name:     "quarter turn angle",
-			m:        MinutiaFormat{Type: 1, X: 1234, Y: 5678, Quality: 200, Orientation: math.Pi / 2},
+			// The standard's own worked example: orientation 16 is 22.5 degrees.
+			name:     "22.5 degree orientation",
+			m:        MinutiaFormat{Type: 1, X: 1234, Y: 5678, Quality: 50, Orientation: 22.5 * math.Pi / 180},
 			firstTwo: 0x4000 | 1234,
 			nextTwo:  0x0000 | 5678,
-			angle:    64, // 90 degrees / 1.40625
-			quality:  200,
+			angle:    16,
+			quality:  50,
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			raw, err := Build(64, 64, 0, []MinutiaFormat{c.m})
+			raw, err := Build(64, 64, 0, 0, 100, []MinutiaFormat{c.m})
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
-			m := raw[RecordHeaderLen+fixedBlockLen:][:minutiaSize]
+			m := raw[RecordHeaderLen+FingerHeaderLen:][:minutiaSize]
 
 			if got := binary.BigEndian.Uint16(m[0:2]); got != c.firstTwo {
 				t.Errorf("bytes [0:2] = 0x%04X; want 0x%04X", got, c.firstTwo)
@@ -98,23 +172,26 @@ func TestMinutiaRecordMatchesTheStandard(t *testing.T) {
 				t.Errorf("bytes [2:4] = 0x%04X; want 0x%04X (reserved bits must be zero)", got, c.nextTwo)
 			}
 			if m[4] != c.angle {
-				t.Errorf("angle byte = %d; want %d", m[4], c.angle)
+				t.Errorf("orientation byte = %d; want %d", m[4], c.angle)
 			}
 			if m[5] != c.quality {
 				t.Errorf("quality byte = %d; want %d", m[5], c.quality)
 			}
 			if len(m) != 6 {
-				t.Errorf("minutia record is %d bytes; the 2005 format fixes it at 6", len(m))
+				t.Errorf("minutia record is %d bytes; the standard fixes it at 6", len(m))
 			}
 		})
 	}
 }
 
-// TestAngleIs360Over256 asserts the granularity the standard names, expressed
-// the other way round: a full turn must land on exactly 256 steps.
+// TestAngleIs360Over256 asserts the granularity the standard names.
 func TestAngleIs360Over256(t *testing.T) {
 	if deg := angleUnits * 180 / math.Pi; math.Abs(deg-1.40625) > 1e-12 {
 		t.Fatalf("one LSB is %v degrees; the standard specifies 1.40625", deg)
+	}
+	// The standard's worked example: byte value 16 means 22.5 degrees.
+	if got := float64(16) * angleUnits * 180 / math.Pi; math.Abs(got-22.5) > 1e-9 {
+		t.Errorf("orientation byte 16 = %v degrees; the standard's example says 22.5", got)
 	}
 }
 
@@ -132,9 +209,9 @@ func angleDelta(a, b float64) float64 {
 // interop: a template exported must come back with the same minutiae, or a
 // database round trip silently degrades every enrolled finger.
 func TestRoundTrip_MinutiaeSurviveExactly(t *testing.T) {
-	for _, n := range []int{0, 1, 2, 12, 40, 120, 256} {
+	for _, n := range []int{0, 1, 2, 12, 40, 120, 255} {
 		in := sample(n)
-		raw, err := Build(200, 200, 0x01, in)
+		raw, err := Build(200, 200, 1, 0, 85, in)
 		if err != nil {
 			t.Fatalf("Build(%d minutiae): %v", n, err)
 		}
@@ -142,17 +219,19 @@ func TestRoundTrip_MinutiaeSurviveExactly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%d minutiae): %v", n, err)
 		}
-		if len(got.Minutiae) != len(in) {
-			t.Fatalf("got %d minutiae; want %d", len(got.Minutiae), len(in))
+		if len(got.Views) != 1 {
+			t.Fatalf("got %d views; want 1", len(got.Views))
+		}
+		out := got.Views[0].Minutiae
+		if len(out) != len(in) {
+			t.Fatalf("got %d minutiae; want %d", len(out), len(in))
 		}
 		for i := range in {
-			g := got.Minutiae[i]
-			w := in[i]
+			g, w := out[i], in[i]
 			if g.Type != w.Type || g.X != w.X || g.Y != w.Y || g.Quality != w.Quality {
 				t.Fatalf("minutia %d: got %+v; want %+v", i, g, w)
 			}
-			// The angle field is 8-bit, so it is lossy by design. The error
-			// must stay within half an LSB.
+			// The angle field is 8-bit, so it is lossy by design.
 			if delta := angleDelta(g.Orientation, w.Orientation); delta > halfLSB+1e-12 {
 				t.Errorf("minutia %d orientation drifted by %v (half LSB is %v; got %v want %v)",
 					i, delta, halfLSB, g.Orientation, w.Orientation)
@@ -161,28 +240,34 @@ func TestRoundTrip_MinutiaeSurviveExactly(t *testing.T) {
 		if got.Width != 200 || got.Height != 200 {
 			t.Errorf("dimensions = %dx%d; want 200x200", got.Width, got.Height)
 		}
-		if got.FingerPosition != 0x01 {
-			t.Errorf("FingerPosition = %d; want 1", got.FingerPosition)
+		if got.Views[0].FingerPosition != 1 {
+			t.Errorf("FingerPosition = %d; want 1", got.Views[0].FingerPosition)
+		}
+		if got.Views[0].Quality != 85 {
+			t.Errorf("finger quality = %d; want 85", got.Views[0].Quality)
+		}
+		if got.ResolutionX != 500 || got.ResolutionY != 500 {
+			t.Errorf("resolution = %dx%d; want 500x500", got.ResolutionX, got.ResolutionY)
 		}
 	}
 }
 
 // TestXAndYAreIndependentFields guards against X and Y being packed into one
-// field: a single 12-bit pair silently mis-places every coordinate, and the
+// field: a single narrow pair silently mis-places every coordinate, and the
 // round trip still succeeds.
 func TestXAndYAreIndependentFields(t *testing.T) {
 	cases := []struct{ x, y uint16 }{
 		{0, 0},
-		{maxCoord, 0}, // max X, zero Y
-		{0, maxCoord}, // zero X, max Y - the case a packed field destroys
+		{maxCoord, 0},
+		{0, maxCoord}, // the case a packed field destroys
 		{1, maxCoord},
 		{maxCoord, 1},
 		{123, 4567},
 		{maxCoord, maxCoord},
 	}
 	for _, c := range cases {
-		raw, err := Build(100, 100, 0x00, []MinutiaFormat{
-			{Type: 1, X: c.x, Y: c.y, Quality: 200, Orientation: 1.0},
+		raw, err := Build(100, 100, 0, 0, 100, []MinutiaFormat{
+			{Type: 1, X: c.x, Y: c.y, Quality: 60, Orientation: 1.0},
 		})
 		if err != nil {
 			t.Fatalf("Build(%d,%d): %v", c.x, c.y, err)
@@ -191,9 +276,10 @@ func TestXAndYAreIndependentFields(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%d,%d): %v", c.x, c.y, err)
 		}
-		if got.Minutiae[0].X != c.x || got.Minutiae[0].Y != c.y {
+		m := got.Views[0].Minutiae[0]
+		if m.X != c.x || m.Y != c.y {
 			t.Errorf("round trip (%d,%d) -> (%d,%d); X and Y are not independent",
-				c.x, c.y, got.Minutiae[0].X, got.Minutiae[0].Y)
+				c.x, c.y, m.X, m.Y)
 		}
 	}
 }
@@ -201,22 +287,15 @@ func TestXAndYAreIndependentFields(t *testing.T) {
 // TestOrientationAliasesAgree: angles differing by whole turns are the same
 // direction and must encode to the same bytes.
 func TestOrientationAliasesAgree(t *testing.T) {
-	base := []MinutiaFormat{{Type: 1, X: 10, Y: 10, Quality: 100, Orientation: 0.5}}
-	// Every one of these is 0.5 radians plus a whole number of turns, so all
-	// of them name the same direction and must encode identically.
-	aliases := []float64{
-		0.5,
-		0.5 + 2*math.Pi,
-		0.5 - 2*math.Pi,
-		0.5 + 8*math.Pi,
-		0.5 - 6*math.Pi,
-	}
+	base := []MinutiaFormat{{Type: 1, X: 10, Y: 10, Quality: 70, Orientation: 0.5}}
+	// Every one of these is 0.5 radians plus a whole number of turns.
+	aliases := []float64{0.5, 0.5 + 2*math.Pi, 0.5 - 2*math.Pi, 0.5 + 8*math.Pi, 0.5 - 6*math.Pi}
 
 	var want []byte
 	for i, ang := range aliases {
 		m := append([]MinutiaFormat(nil), base...)
 		m[0].Orientation = ang
-		raw, err := Build(64, 64, 0, m)
+		raw, err := Build(64, 64, 0, 0, 100, m)
 		if err != nil {
 			t.Fatalf("Build(%v): %v", ang, err)
 		}
@@ -234,8 +313,8 @@ func TestOrientationAliasesAgree(t *testing.T) {
 // value rather than an arbitrary float-to-integer conversion.
 func TestOrientationOutOfRangeIsNotGarbage(t *testing.T) {
 	for _, ang := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), 1e12, -1e12} {
-		raw, err := Build(64, 64, 0, []MinutiaFormat{
-			{Type: 1, X: 10, Y: 10, Orientation: ang},
+		raw, err := Build(64, 64, 0, 0, 100, []MinutiaFormat{
+			{Type: 1, X: 10, Y: 10, Quality: 70, Orientation: ang},
 		})
 		if err != nil {
 			t.Fatalf("Build(%v): %v", ang, err)
@@ -244,17 +323,13 @@ func TestOrientationOutOfRangeIsNotGarbage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%v): %v", ang, err)
 		}
-		o := got.Minutiae[0].Orientation
+		o := got.Views[0].Minutiae[0].Orientation
 		if math.IsNaN(o) || o < 0 || o >= 2*math.Pi {
 			t.Errorf("orientation %v encoded to out-of-range %v", ang, o)
 		}
 	}
 }
 
-// TestParse_RejectsShortHeader covers a truncated record header. Every byte is
-// zero, so the magic check would also fail - the length check has to come first
-// or a short read is reported as "wrong format", which sends a caller looking
-// for a format problem instead of a truncated file.
 func TestParse_RejectsShortHeader(t *testing.T) {
 	for n := 0; n < RecordHeaderLen; n++ {
 		if _, err := Parse(make([]byte, n)); !errors.Is(err, ErrTooShort) {
@@ -263,139 +338,136 @@ func TestParse_RejectsShortHeader(t *testing.T) {
 	}
 }
 
-// TestParse_RejectsShortBody truncates a record that is otherwise valid, so the
-// magic, version and length fields all pass and the data-block length is what
-// actually gets tested.
-func TestParse_RejectsShortBody(t *testing.T) {
-	full, err := Build(64, 64, 0, nil)
+// TestParse_RejectsForeignIdentifierAndVersion pins the two string-valued
+// header fields, which an earlier draft of this package got numerically wrong.
+func TestParse_RejectsForeignIdentifierAndVersion(t *testing.T) {
+	good, err := Build(64, 64, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 50}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for bodyLen := 0; bodyLen < fixedBlockLen; bodyLen++ {
-		raw := append([]byte(nil), full[:RecordHeaderLen+bodyLen]...)
-		binary.BigEndian.PutUint32(raw[8:12], uint32(len(raw)))
-		if _, err := Parse(raw); !errors.Is(err, ErrTooShort) {
-			t.Errorf("Parse with a %d-byte data block = %v; want ErrTooShort", bodyLen, err)
-		}
-	}
-}
-
-// TestParse_RejectsTruncatedMinutiaeList: the length fields still agree, so only
-// the declared minutiae count vs available bytes can catch this.
-func TestParse_RejectsTruncatedMinutiaeList(t *testing.T) {
-	full, err := Build(64, 64, 0, sample(10))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for cut := 1; cut < 10*minutiaSize; cut += 3 {
-		raw := append([]byte(nil), full[:len(full)-cut]...)
-		binary.BigEndian.PutUint32(raw[8:12], uint32(len(raw)))
-		if _, err := Parse(raw); !errors.Is(err, ErrMalformed) {
-			t.Errorf("Parse truncated by %d bytes = %v; want ErrMalformed", cut, err)
-		}
-	}
-}
-
-func TestParse_RejectsForeignFormat(t *testing.T) {
-	raw, _ := Build(100, 100, 0, []MinutiaFormat{{Type: 1, X: 1, Y: 1}})
-	for _, bad := range []uint32{0x00000001, 0x00000002, 0x00000000, 0xFFFFFFFF} {
+	// The 19794-5 style numeric codes are NOT valid 19794-2 identifiers.
+	for _, bad := range []uint32{0x00000003, 0x00000002, 0x00000001, 0x00000000} {
+		raw := append([]byte(nil), good...)
 		binary.BigEndian.PutUint32(raw[0:4], bad)
 		if _, err := Parse(raw); !errors.Is(err, ErrBadMagic) {
-			t.Errorf("format 0x%08X = %v; want ErrBadMagic", bad, err)
+			t.Errorf("identifier 0x%08X = %v; want ErrBadMagic", bad, err)
 		}
 	}
-}
-
-// TestParse_Rejects2011Version: the 2011 edition redefines the minutia record,
-// so accepting it would silently misread every coordinate.
-func TestParse_Rejects2011Version(t *testing.T) {
-	for _, v := range []uint32{0x03000000, 0x02010000, 0x01000000} {
-		raw, _ := Build(100, 100, 0, []MinutiaFormat{{Type: 1, X: 1, Y: 1}})
-		binary.BigEndian.PutUint32(raw[4:8], v)
+	// Versions are ASCII strings, so the 2011 edition is " 30".
+	for _, v := range []string{" 30\x00", " 10\x00", "\x00\x00\x00\x00", "2 0\x00"} {
+		raw := append([]byte(nil), good...)
+		copy(raw[4:8], v)
 		if _, err := Parse(raw); !errors.Is(err, ErrBadVersion) {
-			t.Errorf("version 0x%08X = %v; want ErrBadVersion", v, err)
+			t.Errorf("version %q = %v; want ErrBadVersion", v, err)
 		}
 	}
 }
 
 func TestParse_RejectsLengthMismatch(t *testing.T) {
-	raw, _ := Build(100, 100, 0, []MinutiaFormat{{Type: 1, X: 1, Y: 1}})
+	raw, _ := Build(100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 50}})
 	binary.BigEndian.PutUint32(raw[8:12], uint32(len(raw)+10))
 	if _, err := Parse(raw); !errors.Is(err, ErrLengthMismatch) {
 		t.Fatalf("error = %v; want ErrLengthMismatch", err)
 	}
 }
 
-// TestParse_RejectsMultipleViews: silently reading only the first view would
-// discard fingers from a template.
-func TestParse_RejectsMultipleViews(t *testing.T) {
-	raw, _ := Build(100, 100, 0, []MinutiaFormat{{Type: 1, X: 1, Y: 1}})
-	raw[RecordHeaderLen] = 2 // declare two finger views
-	if _, err := Parse(raw); !errors.Is(err, ErrTooManyViews) {
-		t.Fatalf("error = %v; want ErrTooManyViews", err)
+// TestParse_RejectsTruncatedBody exercises each truncation point: the finger
+// header, the minutiae list, and the extended data length field.
+func TestParse_RejectsTruncatedBody(t *testing.T) {
+	full, err := Build(64, 64, 0, 0, 100, sample(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for cut := 1; cut <= FingerHeaderLen+10*minutiaSize+extAreaLenSize; cut++ {
+		raw := append([]byte(nil), full[:len(full)-cut]...)
+		binary.BigEndian.PutUint32(raw[8:12], uint32(len(raw)))
+		if _, err := Parse(raw); err == nil {
+			t.Errorf("Parse truncated by %d bytes = nil error; want a rejection", cut)
+		}
 	}
 }
 
-// TestParse_RejectsImplausibleCounts ensures a hostile count cannot drive an
-// out-of-range slice before the length check.
-func TestParse_RejectsImplausibleCounts(t *testing.T) {
-	raw, _ := Build(100, 100, 0, []MinutiaFormat{{Type: 1, X: 1, Y: 1}})
-	body := raw[RecordHeaderLen:]
-	binary.BigEndian.PutUint16(body[4:6], 0xFFFF) // 65535 minutiae claimed
+// TestParse_RejectsTrailingBytes: extra data that the view count does not
+// account for means the record disagrees with itself.
+func TestParse_RejectsTrailingBytes(t *testing.T) {
+	raw, _ := Build(64, 64, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 50}})
+	raw = append(raw, 0xDE, 0xAD)
+	binary.BigEndian.PutUint32(raw[8:12], uint32(len(raw)))
 	if _, err := Parse(raw); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("count of 65535 = %v; want ErrMalformed", err)
-	}
-
-	// A count within the count field but above the supported maximum.
-	raw2, _ := Build(100, 100, 0, []MinutiaFormat{{Type: 1, X: 1, Y: 1}})
-	binary.BigEndian.PutUint16(raw2[RecordHeaderLen+4:RecordHeaderLen+6], maxMinutiae+1)
-	if _, err := Parse(raw2); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("count above the cap = %v; want ErrMalformed", err)
+		t.Fatalf("error = %v; want ErrMalformed", err)
 	}
 }
 
-// TestParse_PreservesExtensionDataVerbatim: extension data is carried through
-// untouched rather than reinterpreted.
-func TestParse_PreservesExtensionDataVerbatim(t *testing.T) {
-	raw, _ := Build(100, 100, 0, []MinutiaFormat{{Type: 1, X: 7, Y: 9, Quality: 5}})
-	ext := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01}
-	withExt := append(append([]byte(nil), raw...), ext...)
-	binary.BigEndian.PutUint32(withExt[8:12], uint32(len(withExt)))
+// TestParse_PreservesExtendedDataVerbatim: the area is carried through
+// untouched. Ridge count and core/delta blocks survive, undecoded.
+func TestParse_PreservesExtendedDataVerbatim(t *testing.T) {
+	full, err := Build(100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 7, Y: 9, Quality: 55}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	got, err := Parse(withExt)
+	// One block: type 0x0002 (core and delta), length 6, six bytes of data.
+	block := make([]byte, 0, extBlockHeaderLen+6)
+	block = append(block, 0x00, 0x02)
+	block = append(block, 0x00, 0x06)
+	block = append(block, 1, 2, 3, 4, 5, 6)
+
+	area := append([]byte{byte(len(block) >> 8), byte(len(block))}, block...)
+
+	raw := append(append([]byte(nil), full[:len(full)-extAreaLenSize]...), area...)
+	binary.BigEndian.PutUint32(raw[8:12], uint32(len(raw)))
+
+	got, err := Parse(raw)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if !bytes.Equal(got.ExtensionData, ext) {
-		t.Errorf("ExtensionData = %v; want %v preserved verbatim", got.ExtensionData, ext)
+	v := got.Views[0]
+	if !bytes.Equal(v.ExtendedData, block) {
+		t.Errorf("ExtendedData = %v; want %v preserved verbatim", v.ExtendedData, block)
 	}
-	if got.Minutiae[0].X != 7 || got.Minutiae[0].Y != 9 {
-		t.Errorf("minutia before extension = (%d,%d); want (7,9)",
-			got.Minutiae[0].X, got.Minutiae[0].Y)
+	if v.Minutiae[0].X != 7 || v.Minutiae[0].Y != 9 {
+		t.Errorf("minutia before the extended area = (%d,%d); want (7,9)", v.Minutiae[0].X, v.Minutiae[0].Y)
+	}
+}
+
+// TestParse_RejectsOversizedExtendedDataArea: the area length is attacker
+// controlled, so it must be validated before slicing.
+func TestParse_RejectsOversizedExtendedDataArea(t *testing.T) {
+	raw, _ := Build(64, 64, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 50}})
+	at := len(raw) - extAreaLenSize
+	binary.BigEndian.PutUint16(raw[at:], 0xFFFF)
+	if _, err := Parse(raw); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("error = %v; want ErrMalformed", err)
 	}
 }
 
 func TestBuild_RejectsBadInput(t *testing.T) {
-	good := []MinutiaFormat{{Type: 1, X: 10, Y: 10}}
+	good := []MinutiaFormat{{Type: 1, X: 10, Y: 10, Quality: 10}}
 	cases := map[string]struct {
-		w, h int
-		m    []MinutiaFormat
+		w, h             int
+		fp, imp, quality uint8
+		m                []MinutiaFormat
 	}{
-		"zero width":         {0, 100, good},
-		"zero height":        {100, 0, good},
-		"negative width":     {-1, 100, good},
-		"x over 14 bits":     {100, 100, []MinutiaFormat{{Type: 1, X: maxCoord + 1, Y: 1}}},
-		"y over 14 bits":     {100, 100, []MinutiaFormat{{Type: 1, X: 1, Y: maxCoord + 1}}},
-		"dimension overflow": {70000, 70000, good},
-		"too many minutiae":  {100, 100, sample(maxMinutiae + 1)},
-		"reserved type 0":    {100, 100, []MinutiaFormat{{Type: 0, X: 1, Y: 1}}},
-		"reserved type 3":    {100, 100, []MinutiaFormat{{Type: 3, X: 1, Y: 1}}},
-		"reserved type 15":   {100, 100, []MinutiaFormat{{Type: 15, X: 1, Y: 1}}},
-		"one bad among many": {100, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1}, {Type: 9, X: 2, Y: 2}}},
+		"zero width":          {0, 100, 0, 0, 100, good},
+		"zero height":         {100, 0, 0, 0, 100, good},
+		"negative width":      {-1, 100, 0, 0, 100, good},
+		"dimension overflow":  {70000, 70000, 0, 0, 100, good},
+		"finger position 11":  {100, 100, 11, 0, 100, good},
+		"impression 4":        {100, 100, 0, 4, 100, good},
+		"impression 7":        {100, 100, 0, 7, 100, good},
+		"impression 9":        {100, 100, 0, 9, 100, good},
+		"finger quality 101":  {100, 100, 0, 0, 101, good},
+		"x over 14 bits":      {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: maxCoord + 1, Y: 1, Quality: 10}}},
+		"y over 14 bits":      {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: maxCoord + 1, Quality: 10}}},
+		"minutia quality 0":   {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 0}}},
+		"minutia quality 101": {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 101}}},
+		"reserved type 3":     {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 3, X: 1, Y: 1, Quality: 10}}},
+		"too many minutiae":   {100, 100, 0, 0, 100, sample(256)},
+		"one bad among many":  {100, 100, 0, 0, 100, []MinutiaFormat{{Type: 1, X: 1, Y: 1, Quality: 10}, {Type: 3, X: 2, Y: 2, Quality: 10}}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Build(c.w, c.h, 0, c.m); err == nil {
+			if _, err := Build(c.w, c.h, c.fp, c.imp, c.quality, c.m); err == nil {
 				t.Errorf("Build(%s) = nil error", name)
 			}
 		})
@@ -406,10 +478,18 @@ func TestBuild_RejectsBadInput(t *testing.T) {
 // external database, so malformed input must error rather than crash enrollment.
 func TestParse_NeverPanicsOnArbitraryBytes(t *testing.T) {
 	r := rand.New(rand.NewSource(21))
-	for i := 0; i < 2000; i++ {
+	for i := 0; i < 3000; i++ {
 		n := r.Intn(300)
 		b := make([]byte, n)
 		r.Read(b)
+		// Force a valid prefix sometimes so execution gets past the identifier
+		// check and exercises the length arithmetic.
+		if n >= RecordHeaderLen && i%3 == 0 {
+			copy(b[0:4], formatIdentifier)
+			copy(b[4:8], version2005)
+			binary.BigEndian.PutUint32(b[8:12], uint32(n))
+			b[22] = byte(r.Intn(4))
+		}
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -418,41 +498,5 @@ func TestParse_NeverPanicsOnArbitraryBytes(t *testing.T) {
 			}()
 			_, _ = Parse(b)
 		}()
-	}
-}
-
-// TestParse_MutationIsDetected: flipping a count field must not yield a record
-// that parses to the original minutiae.
-func TestParse_MutationIsDetected(t *testing.T) {
-	in := sample(20)
-	raw, _ := Build(150, 150, 0, in)
-	orig, err := Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mutated := append([]byte(nil), raw...)
-	mutated[RecordHeaderLen+4] ^= 0x01 // perturb the minutiae count
-	got, err := Parse(mutated)
-	if err != nil {
-		return // rejecting is fine
-	}
-	if len(got.Minutiae) == len(orig.Minutiae) && len(in) > 0 {
-		t.Error("perturbing the minutiae count produced an identical parse")
-	}
-}
-
-// TestReservedBitsAreAlwaysZero: the two bits above y are reserved and writing
-// them non-zero is a conformance violation that still parses.
-func TestReservedBitsAreAlwaysZero(t *testing.T) {
-	raw, err := Build(64, 64, 0, []MinutiaFormat{
-		{Type: 2, X: maxCoord, Y: maxCoord, Quality: 255, Orientation: 3.0},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := raw[RecordHeaderLen+fixedBlockLen:][:minutiaSize]
-	if binary.BigEndian.Uint16(m[2:4])&0xC000 != 0 {
-		t.Errorf("reserved bits set: bytes [2:4] = 0x%04X", binary.BigEndian.Uint16(m[2:4]))
 	}
 }

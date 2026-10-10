@@ -114,19 +114,19 @@ These are real and worth stating plainly:
   larger standard. What exists is ISO/IEC 19794-4 *image* records
   (`pkg/biometrics/iso19794`) and ISO/IEC 19794-2:2005 *minutiae* records
   (`pkg/biometrics/iso19794b`).
-  - Only the uncompressed 8-bit image representation; no WSQ.
-  - Only single-view minutiae records. A record carrying multiple finger views
-    is rejected rather than partially read, because returning only the first
-    view would silently drop fingers from a template.
-  - Extension data is preserved byte-for-byte, never interpreted. Ridge-count
-    and core/delta blocks survive a round trip but are not decoded.
-  - The 2011 edition is rejected, not misread — it redefines the minutia record.
-  - **The two unverified fields are called out in the package docs:** the
-    13-byte finger-block header and the 12-byte starting-point record could not
-    be checked against the standard's Table 3, which is paywalled. The minutiae
-    record itself *is* pinned to the standard's normative text, byte by byte,
-    in `TestMinutiaRecordMatchesTheStandard`. Until a real third-party record is
-    fed to `Parse`, treat a wire-format bug in those two fields as live.
+  - Only uncompressed 8-bit images; no WSQ.
+  - The 19794-2 extended data area (ridge counts, core/delta, zonal quality) is
+    preserved byte-for-byte but **not decoded**, and `Build` does not write one.
+    The Appendix D certification block is flagged but not parsed.
+  - The 2011 edition is rejected, not misread — it restructures the record.
+  - Every field offset is pinned against the standard's normative text and
+    byte-offset tables in `TestRecordHeaderMatchesTheStandard`,
+    `TestFingerHeaderMatchesTheStandard` and `TestMinutiaRecordMatchesTheStandard`.
+    Worth knowing: **the 19794-2 header is not laid out like the 19794-4
+    header** despite both being 24 bytes. 19794-2 puts a certification flag and
+    12-bit capture device ID at `[12:14]` where 19794-4 puts image height, and
+    its width is at `[14:16]`. Reading one with the other's offsets yields a
+    plausible-looking but wrong record rather than an error.
 - **Composite (multi-finger) recognition is out of scope.** No.
 - **The edge cache defaults its WAL to a fixed path** in the system temp
   directory. Two edge nodes sharing a host would write the same file. Make it

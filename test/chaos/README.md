@@ -70,7 +70,20 @@ after everything — tests and fuzz seeds alike.
 
 An isolated run (`-run TestChaos_ImageDegradation`) will deliberately fail the
 gate: it is the point of the gate, since it catches a suite that silently
-stopped covering things. Use `-short` to skip the gate entirely.
+stopped covering things.
+
+Two flags skip the gate, and both are detected by **prefix** matching against
+the test binary's own arguments:
+
+- `-short`
+- `-fuzz=<target>`, because a fuzzing run is isolated by construction
+
+The prefix matters more than it looks. `go test -short` hands the binary
+`-test.short=true`, never a bare `-test.short`, so an exact string comparison
+silently never matched and `-short` skipped nothing — while the README claimed
+it did. And under `-fuzz`, `go test` re-executes the binary once per fuzzing
+worker with its own argument set, so `-test.short` is not carried across at
+all and fuzzing has to be detected from `-test.fuzz` directly.
 
 ## Dimensions
 

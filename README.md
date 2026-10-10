@@ -15,7 +15,7 @@ services, SIA OSDP v2.2 hardware integration, and a 3,000-case chaos suite.
 | Area | Where |
 |---|---|
 | Biometric pipeline | `pkg/biometrics/` — image, minutiae, MCC, quality, crypto |
-| Interop | `pkg/biometrics/iso19794/` — ISO/IEC 19794-4 record read/write |
+| Interop | `pkg/biometrics/iso19794/` — ISO/IEC 19794-4 image records; `pkg/biometrics/iso19794b/` — ISO/IEC 19794-2 minutiae records |
 | Hardware | `pkg/hardware/` — OSDP v2.2 framing, turnstile driver |
 | Security | `pkg/security/` — TLS, rate limiting; `pkg/resilience/` — admission control, circuit breakers |
 | Storage | `pkg/store/` — SQLite (default) and PostgreSQL drivers behind one interface |
@@ -110,9 +110,23 @@ These are real and worth stating plainly:
 - **`pkg/security/tls` is not wired into any service yet.** The package fails
   closed when misconfigured and is well tested, but no gRPC server currently
   uses mTLS. Inter-service traffic is still plaintext.
-- **MINEX III is not implemented.** Templates are proprietary; interoperability
-  covers the ISO/IEC 19794-4 *image* record only, for the uncompressed 8-bit
-  representation.
+- **MINEX III is not implemented.** It is a certified template format and a much
+  larger standard. What exists is ISO/IEC 19794-4 *image* records
+  (`pkg/biometrics/iso19794`) and ISO/IEC 19794-2:2005 *minutiae* records
+  (`pkg/biometrics/iso19794b`).
+  - Only the uncompressed 8-bit image representation; no WSQ.
+  - Only single-view minutiae records. A record carrying multiple finger views
+    is rejected rather than partially read, because returning only the first
+    view would silently drop fingers from a template.
+  - Extension data is preserved byte-for-byte, never interpreted. Ridge-count
+    and core/delta blocks survive a round trip but are not decoded.
+  - The 2011 edition is rejected, not misread — it redefines the minutia record.
+  - **The two unverified fields are called out in the package docs:** the
+    13-byte finger-block header and the 12-byte starting-point record could not
+    be checked against the standard's Table 3, which is paywalled. The minutiae
+    record itself *is* pinned to the standard's normative text, byte by byte,
+    in `TestMinutiaRecordMatchesTheStandard`. Until a real third-party record is
+    fed to `Parse`, treat a wire-format bug in those two fields as live.
 - **Composite (multi-finger) recognition is out of scope.** No.
 - **The edge cache defaults its WAL to a fixed path** in the system temp
   directory. Two edge nodes sharing a host would write the same file. Make it

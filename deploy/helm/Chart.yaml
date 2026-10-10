@@ -1,0 +1,16 @@
+apiVersion: v2
+name: anguli
+description: anguli (অঙ্গুলি, "finger") — fingerprint access-control platform
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - biometrics
+  - fingerprint
+  - access-control
+  - osdp
+home: https://github.com/MuhibNayem/anguli
+sources:
+  - https://github.com/MuhibNayem/anguli
+maintainers:
+  - name: MuhibNayem

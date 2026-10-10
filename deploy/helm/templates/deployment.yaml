@@ -1,0 +1,149 @@
+{{- $root := . -}}
+{{/*
+Build an address map from the component list so env vars reference the same
+ports the Services expose. Looking values up with `where` is fragile across Helm
+versions; a dict built here is explicit and stable.
+*/}}
+{{- $addr := dict -}}
+{{- range $c := $root.Values.components -}}
+{{- $_ := set $addr $c.name (printf "%s-%s:%v" (include "anguli.fullname" $root) $c.name $c.port) -}}
+{{- end -}}
+{{- range $c := .Values.components }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anguli.fullname" $root }}-{{ $c.name }}
+  labels:
+    {{- include "anguli.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $c.name }}
+spec:
+  {{- if not $root.Values.autoscaling.enabled }}
+  replicas: {{ $c.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "anguli.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $c.name }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 keeps full door capacity during a rollout; a
+      # degraded access path is a safety issue, not just an availability one.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "anguli.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $c.name }}
+      {{- with $root.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "anguli.serviceAccountName" $root }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $c.name }}
+          securityContext:
+            {{- toYaml $root.Values.securityContext | nindent 12 }}
+          image: {{ include "anguli.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          ports:
+            - name: {{ if eq $c.healthScheme "http" }}http{{ else }}grpc{{ end }}
+              containerPort: {{ $c.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ $c.port | quote }}
+            - name: ENVIRONMENT
+              value: {{ $root.Values.environment | quote }}
+            {{- if eq $c.name "api-gateway" }}
+            - name: BIOMETRIC_ADDR
+              value: {{ index $addr "biometric" | quote }}
+            - name: POLICY_ADDR
+              value: {{ index $addr "policy" | quote }}
+            - name: EDGE_ADDR
+              value: {{ index $addr "edge" | quote }}
+            - name: MAX_CONCURRENT_REQUESTS
+              value: {{ $root.Values.overload.maxConcurrentRequests | quote }}
+            - name: ADMISSION_GRACE_MS
+              value: {{ $root.Values.overload.admissionGraceMs | quote }}
+            {{- end }}
+            {{- if eq $c.name "edge" }}
+            - name: POLICY_ADDR
+              value: {{ index $addr "policy" | quote }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ $root.Values.existingSecret.name }}
+          {{- if eq $c.healthScheme "http" }}
+          startupProbe:
+            {{- toYaml $root.Values.startupProbe | nindent 12 }}
+          livenessProbe:
+            {{- toYaml $root.Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml $root.Values.readinessProbe | nindent 12 }}
+          {{- else }}
+          # gRPC components expose the standard grpc.health.v1 service, which
+          # Kubernetes probes as an HTTP/2 GET on /grpc.health.v1.Health/Check.
+          # This checks the health service rather than raw TCP, so a process
+          # that is alive but not serving is correctly reported unready.
+          startupProbe:
+            grpc:
+              port: {{ $c.port }}
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            grpc:
+              port: {{ $c.port }}
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            grpc:
+              port: {{ $c.port }}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- end }}
+          resources:
+            {{- toYaml $root.Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if $c.persistence }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if $c.persistence }}
+        - name: data
+          {{- if $root.Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "anguli.fullname" $root }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+      {{- with $root.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

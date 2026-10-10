@@ -1,0 +1,145 @@
+# Default values for the anguli chart.
+#
+# Secrets are NOT defined here. The chart refuses to render a usable release
+# without existingSecret.name pointing at a Secret you created out of band:
+
+#   kubectl create secret generic anguli-secrets \
+#     --from-literal=MASTER_KEY="$(openssl rand -hex 32)" \
+#     --from-literal=API_GATEWAY_KEY="$(openssl rand -hex 32)"
+
+replicaCount: 2
+
+image:
+  registry: ghcr.io
+  repository: muhelnayem/anguli
+  tag: ""          # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+existingSecret:
+  name: ""         # REQUIRED. No default: a chart that silently renders an
+                   # empty secret would start a door controller with no key.
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+
+environment: production
+
+# Every component in the platform. The chart renders one Deployment and one
+# Service per entry, so adding a service is a values change rather than another
+# copied manifest.
+components:
+  - name: biometric
+    port: 50051
+    replicas: 1
+    healthScheme: grpc
+    persistence: true
+  - name: policy
+    port: 50052
+    replicas: 2
+    healthScheme: grpc
+    persistence: false
+  - name: edge
+    port: 50053
+    replicas: 1
+    healthScheme: grpc
+    persistence: false
+  - name: api-gateway
+    port: 8080
+    replicas: 2
+    healthScheme: http
+    persistence: false
+
+# Overload protection for the api-gateway. Bounding concurrency is what turns
+# an overload into a shed 503 instead of an unbounded queue.
+overload:
+  maxConcurrentRequests: 64
+  admissionGraceMs: 250
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# Probes. Readiness uses the same endpoint the load balancer checks, so an
+# instance is only routed to once it can actually serve.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 5
+  failureThreshold: 30
+
+# A biometric matching pass is CPU-bound and must finish inside the door
+# latency budget. Failing fast on CPU starvation beats being killed mid-scan.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# Durable storage. Without this, a pod restart loses every enrolled template,
+# which is the exact failure the persistence layer exists to prevent.
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+serviceAccountRbac:
+  create: false
+
+podDisruptionBudgetAnnotations: {}

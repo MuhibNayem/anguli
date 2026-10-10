@@ -1,0 +1,28 @@
+{{/*
+Render-time validation.
+
+This lives in its own template file rather than in _helpers.tpl because Helm
+only executes named templates from partials files - a bare block at the top of
+_helpers.tpl is parsed but never run, so the guard silently did nothing.
+
+A biometric access-control platform must never start with an empty master key
+or an unset API key. Failing at `helm template` time is far cheaper than
+discovering it on a door that will not open.
+*/}}
+{{- if not .Values.existingSecret.name }}
+{{- fail "existingSecret.name is required. Create a Secret containing MASTER_KEY and API_GATEWAY_KEY and point this value at it. The chart will not synthesise credentials." }}
+{{- end }}
+
+{{- if lt (int .Values.overload.maxConcurrentRequests) 1 }}
+{{- fail "overload.maxConcurrentRequests must be at least 1; without a ceiling, overload becomes unbounded queueing rather than a shed request" }}
+{{- end }}
+
+{{- if .Values.autoscaling.enabled }}
+{{- if lt (int .Values.autoscaling.minReplicas) 2 }}
+{{- fail "autoscaling.minReplicas must be at least 2; a single-replica biometric service is a single point of failure" }}
+{{- end }}
+{{- end }}
+
+{{- if not .Values.components }}
+{{- fail "components must not be empty; the chart renders one Deployment and Service per entry" }}
+{{- end }}

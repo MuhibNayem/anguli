@@ -1,3 +1,13 @@
+# anguli — local and single-host deployment.
+#
+# Startup ordering: every service declares a healthcheck and dependents wait
+# with `condition: service_healthy`. Without that, docker-compose's `depends_on`
+# only waits for a container to be *created*, not to be *listening*, so the
+# gateway reliably races its backends on a cold start and serves connection
+# refused to whoever happens to arrive first.
+#
+# For multi-node deployment use deploy/helm instead.
+
 services:
   biometric-service:
     build:
@@ -9,7 +19,20 @@ services:
     environment:
       - PORT=50051
       - MASTER_KEY=${MASTER_KEY:?Error: MASTER_KEY environment variable is required and must be a 64-char hex string}
-      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - STORAGE_DRIVER=${STORAGE_DRIVER:-sqlite}
+      - STORAGE_DSN=${STORAGE_DSN:-}
+      - STORAGE_DATA_DIR=/data
+    volumes:
+      - biometric-data:/data
+    healthcheck:
+      # Checks the listener over the wire rather than process liveness: a
+      # process can be alive while its listener is wedged. busybox nc ships in
+      # the alpine runtime, so this needs no extra binary in the image.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   access-policy-service:
@@ -22,6 +45,12 @@ services:
     environment:
       - PORT=50052
       - ENVIRONMENT=${ENVIRONMENT:-production}
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "50052"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   edge-gateway-service:
@@ -35,6 +64,15 @@ services:
       - PORT=50053
       - POLICY_ADDR=access-policy-service:50052
       - ENVIRONMENT=${ENVIRONMENT:-production}
+    depends_on:
+      access-policy-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "50053"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   api-gateway:
@@ -51,8 +89,25 @@ services:
       - EDGE_ADDR=edge-gateway-service:50053
       - API_GATEWAY_KEY=${API_GATEWAY_KEY:?Error: API_GATEWAY_KEY environment variable is required}
       - ENVIRONMENT=${ENVIRONMENT:-production}
+      # Overload protection: bound concurrency so excess load is shed with a
+      # 503 instead of queueing without limit.
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-64}
+      - ADMISSION_GRACE_MS=${ADMISSION_GRACE_MS:-250}
     depends_on:
-      - biometric-service
-      - access-policy-service
-      - edge-gateway-service
+      biometric-service:
+        condition: service_healthy
+      access-policy-service:
+        condition: service_healthy
+      edge-gateway-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
+
+volumes:
+  biometric-data:
+    driver: local

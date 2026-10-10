@@ -151,6 +151,41 @@ It is off by default because a single-host `docker compose up` has no
 certificate authority. That is a development convenience, not a production
 posture: in any real deployment this should be on.
 
+### Rate limiting the biometric endpoints
+
+`/api/v1/biometrics/enroll`, `/api/v1/biometrics/verify` and `/api/v1/doors/scan`
+are rate limited per caller, returning `429` with `Retry-After`.
+
+The reason is specific to biometrics rather than to web services generally. The
+1:N identification path answers *"who does this print belong to"* across the
+whole gallery, so an unthrottled caller can walk a building's roster out of the
+system one scan at a time. The enrolled population of a site is exactly what an
+access system should not disclose, and fingerprint templates cannot be reissued
+if they leak, so the disclosure they cause is permanent.
+
+Buckets are keyed on the strongest credential the caller presents —
+`X-Reader-ID`, then `X-Reader-Token`, then `X-API-Key`, then the remote address —
+and credential values are hashed to a short tag, so process memory never holds a
+raw API key. One noisy door cannot consume another door's budget, which matters
+because every turnstile currently shares a single API key.
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `RATE_LIMIT_RPS` | `10` | Sustained requests per second per caller |
+| `RATE_LIMIT_BURST` | `20` | Instantaneous burst per caller |
+| `RATE_LIMIT_MAX_KEYS` | `10000` | Cap on tracked callers before they share an overflow bucket |
+
+Defaults assume a main gate peaking near 2 scans/second, leaving ~5× headroom.
+Rejections are visible as `anguli_ratelimit_rejected_total`; a sustained
+non-zero rate is either a misconfigured limit or an enumeration attempt.
+
+**What this does not do.** It raises the cost of enumeration from minutes to
+hours and makes the attempt observable. It does not stop a caller who already
+holds valid credentials and is willing to be slow — that requires per-reader
+credentials, which is a deployment property rather than middleware behaviour.
+Setting the limit too low rejects real employees at a door, so it is set
+deliberately and monitored, never quietly disabled.
+
 ### Storage and replica count
 
 Anti-passback is shared state. With one SQLite file per pod, an ENTRY recorded

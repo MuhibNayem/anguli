@@ -173,7 +173,19 @@ func (b *Breaker) Allow() error {
 	case StateClosed:
 		return nil
 	case StateOpen:
-		if b.now().Sub(b.openedAtValue()) < b.cfg.OpenTimeout {
+		// An unset cool-down timestamp means this caller read the state before
+		// a trip recorded when the trip happened - or across a Reset that
+		// cleared it. State and timestamp are not one atomic fact, so the two
+		// reads can straddle a transition and pair "open" with "zero".
+		//
+		// Zero must therefore read as NOT elapsed. The zero time subtracted
+		// from any plausible clock is decades, so treating it as elapsed
+		// concludes the cool-down finished, admits a probe that the cool-down
+		// existed to reject, and parks the breaker in half-open with its single
+		// probe slot already spent. Rejecting here sheds at most one request in
+		// a window that lasts nanoseconds, which is what this primitive is for.
+		openedAt := b.openedAtValue()
+		if openedAt.IsZero() || b.now().Sub(openedAt) < b.cfg.OpenTimeout {
 			b.rejected.Add(1)
 			return fmt.Errorf("%w: still within %v cool-down", ErrBreakerOpen, b.cfg.OpenTimeout)
 		}
@@ -267,6 +279,16 @@ func (b *Breaker) Failure(err error) {
 }
 
 // open trips the breaker.
+//
+// Publishing the cool-down timestamp before the state becomes visible would
+// remove the window described in Allow() at the source rather than defending
+// against it, and was tried first. It is not what fixes the defect: with the
+// unset-timestamp rule in Allow() the suite passes either way, and reordering
+// here has a side effect worth avoiding - open() would then clear the failure
+// history and restart the cool-down on a trip that loses the CAS, changing
+// when a redundant failure extends a cool-down. Since the guard alone is
+// sufficient and provably fails the other way round, the ordering is left
+// alone rather than changed for tidiness.
 func (b *Breaker) open(err error) {
 	if b.transition(StateOpen) {
 		b.mu.Lock()

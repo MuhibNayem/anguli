@@ -48,6 +48,8 @@ should not be cited as such.
 | PIV CBEFF header (NIST SP 800-76-2) | Header implemented | The 88-byte PIV patron format header, with the INCITS modality values Table 15 assigns and field values pinned to the standard's own worked example. The CBEFF signature block is **not** implemented — see below. |
 | Circuit breaker and overload shedding | Production-ready | Breakers gate every downstream RPC; the reject fast path is lock-free. |
 | Match reproducibility | **Was not production-ready until this cycle** | The matcher was **nondeterministic**: spatial-consensus ties were broken by Go map iteration order, so the same probe against the same finger scored differently on repeated calls in about half of all trials. A deny near the threshold could not be reproduced or audited. Tie-breaks are now total and ordered; `TestVerifyIsDeterministic` and `TestVerifyIsDeterministicUnderConcurrency` guard it. |
+| Circuit breaker and overload shedding | **Breaker had a race until this cycle** | The breaker published its open state before its cool-down timestamp, so a concurrent `Allow()` could read the timestamp as unset, compute the cool-down as `now − zero time` (decades), conclude it had elapsed, and admit a probe the cool-down existed to reject — parking the breaker in half-open with its probe slot spent. During an outage that sheds load and then lets one request per trip straight through. An unset timestamp now reads as *not* elapsed. `TestBreaker_NeverHalfOpensWithoutAnElapsedCoolDown` guards it; the same race was making `TestBreaker_ReopenRacesAllowReads` fail ~2% of runs, which made CI intermittently red. |
+| Biometric endpoint rate limiting | **Was absent entirely** | `/api/v1/doors/scan` performs 1:N identification and answers "who does this print belong to" across the whole gallery. Behind one shared API key and with no rate limit, any holder could enumerate a site's enrolled population — the one thing an access system must not disclose, and permanent if leaked, since templates cannot be reissued. Now bounded per caller, hashed so process memory holds no raw credential, and observable via `anguli_ratelimit_rejected_total`. |
 | Template key rotation | Production-ready | Zero-downtime rotation with no re-enrollment: a keyring loaded from the environment, and a `keyrotate` command that decrypts, re-encrypts and verifies every migrated template. Proven to leave the old key unable to read migrated records. |
 
 ## What is not production-ready
@@ -170,6 +172,23 @@ Consequence to be aware of: the header's security-options field carries the
 mandatory PIV value `0x0D`, which *asserts* a signature. A record produced by
 this package is therefore **not yet PIV-conformant** — it must be signed, or
 that field must be rewritten, before it goes near a real card.
+
+### Authentication is a shared API key, not per-reader identity
+
+The gateway authenticates with one shared `API_GATEWAY_KEY` (plus optional reader
+token and reader id headers). Per-caller rate limiting is built on top of this
+and is only as good as the credential behind it: it makes enumeration slow and
+observable, but it cannot stop a caller who already holds a valid key and is
+willing to be slow. Every turnstile also shares one key today, so a key
+compromise is a building-wide compromise.
+
+Closing this properly means per-reader credentials with an identity provider, and
+per-reader audit attribution — an "attempted access by reader X" line that
+proves which physical device presented the credential. Neither is a middleware
+behaviour, and both are deployment and provisioning work rather than code this
+repository can decide on its own. It is listed here because it is the difference
+between "the limiter makes enumeration expensive" and "enumeration is
+attributable to a device".
 
 ### Interoperability is container-level only
 

@@ -31,6 +31,9 @@ type Metrics struct {
 	breakerTransitions *prometheus.GaugeVec
 
 	retryAttempts *prometheus.CounterVec
+
+	rateLimitAllowed  *prometheus.CounterVec
+	rateLimitRejected *prometheus.CounterVec
 }
 
 // NewMetrics builds a Metrics with its own registry, so tests do not collide
@@ -83,6 +86,15 @@ func NewMetrics() *Metrics {
 			Name: "anguli_circuit_breaker_transitions_total",
 			Help: "Total circuit breaker state transitions.",
 		}, []string{"breaker"}),
+		rateLimitAllowed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "anguli_ratelimit_allowed_total",
+			Help: "Sensitive requests admitted by per-caller rate limiting.",
+		}, []string{"limiter"}),
+		rateLimitRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "anguli_ratelimit_rejected_total",
+			Help: "Sensitive requests rejected by per-caller rate limiting. " +
+				"A sustained non-zero rate is either a misconfigured limit or an enumeration attempt.",
+		}, []string{"limiter"}),
 		retryAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "anguli_retry_attempts_total",
 			Help: "Total retry attempts by operation and outcome.",
@@ -92,6 +104,7 @@ func NewMetrics() *Metrics {
 		m.limiterInFlight, m.limiterWaiting, m.limiterAdmitted, m.limiterShed,
 		m.limiterUtil, m.breakerState, m.breakerSuccesses, m.breakerFailures,
 		m.breakerRejected, m.breakerTransitions, m.retryAttempts,
+		m.rateLimitAllowed, m.rateLimitRejected,
 	)
 	return m
 }
@@ -133,6 +146,20 @@ func (m *Metrics) ObserveBreaker(name string, b *Breaker) {
 	m.breakerFailures.WithLabelValues(name).Set(float64(fail))
 	m.breakerRejected.WithLabelValues(name).Set(float64(rej))
 	m.breakerTransitions.WithLabelValues(name).Set(float64(trans))
+}
+
+// ObserveRateLimit records one rate-limit decision.
+//
+// The rejected series exists so an enumeration attempt is visible without
+// having to read logs: the whole point of bounding a caller is that the
+// attempt becomes observable, and a limiter nobody can watch is just a slower
+// service.
+func (m *Metrics) ObserveRateLimit(name string, allowed bool) {
+	if allowed {
+		m.rateLimitAllowed.WithLabelValues(name).Inc()
+		return
+	}
+	m.rateLimitRejected.WithLabelValues(name).Inc()
 }
 
 // ObserveRetry records one retry attempt outcome.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"finger-scanner/pkg/resilience"
+	"finger-scanner/pkg/security/ratelimit"
 	securitytls "finger-scanner/pkg/security/tls"
 	"finger-scanner/pkg/telemetry"
 	"finger-scanner/services/api-gateway/internal/clients"
@@ -137,6 +138,55 @@ func main() {
 		Timeout:     time.Second,
 	})
 
+	// Per-caller rate limiting on the biometric surface.
+	//
+	// The concurrency limiter above protects the SERVICE from overload. This
+	// one protects the DATA, which is the reason it exists: the 1:N
+	// identification path answers "who does this print belong to" across the
+	// whole gallery, so an unthrottled caller holding the shared API key can
+	// walk the building's roster out of the system one scan at a time.
+	//
+	// Defaults assume a busy main gate peaking around 2 scans/second, which
+	// leaves roughly 5x headroom. Raise RATE_LIMIT_RPS for a larger site rather
+	// than removing it - the failure mode of a too-low limit is rejected doors,
+	// so it is set deliberately and observable, never silently.
+	rateLimiter, err := ratelimit.NewKeyedLimiter(ratelimit.KeyedLimiterConfig{
+		Rate:    float64(resilience.ParseIntDefault(os.Getenv("RATE_LIMIT_RPS"), 10)),
+		Burst:   float64(resilience.ParseIntDefault(os.Getenv("RATE_LIMIT_BURST"), 20)),
+		MaxKeys: resilience.ParseIntDefault(os.Getenv("RATE_LIMIT_MAX_KEYS"), 10_000),
+	})
+	if err != nil {
+		logger.ErrorContext(ctx, "invalid rate limit configuration", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	rateLimit := middleware.RateLimit(middleware.RateLimitConfig{
+		Limiter: rateLimiter,
+		Metrics: metrics,
+		Logger:  logger,
+	})
+
+	// Evict idle caller buckets so the table tracks active readers rather than
+	// every caller seen since boot. Without this the limiter's own memory
+	// grows without bound, which would make it the outage it exists to avoid.
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				rateLimiter.Sweep()
+			}
+		}
+	}()
+
+	logger.InfoContext(ctx, "per-caller rate limiting enabled",
+		slog.Float64("requests_per_second", rateLimiter.Rate()),
+		slog.Float64("burst", rateLimiter.Burst()),
+		slog.Int("max_tracked_callers", resilience.ParseIntDefault(os.Getenv("RATE_LIMIT_MAX_KEYS"), 10_000)),
+	)
+
 	// L3: Configurable and restricted CORS origins
 	corsOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
 	var origins []string
@@ -154,9 +204,12 @@ func main() {
 	// C4 & C5: Protected REST Endpoints requiring API Key or Bearer Token.
 	// Every request passes admission control first so the ceiling applies
 	// before any work is accepted.
-	mux.HandleFunc("/api/v1/biometrics/enroll", overload(cors(authConfig.RequireAuth(handler.HandleEnroll))))
-	mux.HandleFunc("/api/v1/biometrics/verify", overload(cors(authConfig.RequireAuth(handler.HandleVerify))))
-	mux.HandleFunc("/api/v1/doors/scan", overload(cors(authConfig.RequireAuth(handler.HandleDoorScan))))
+	// rateLimit sits inside auth so an unauthenticated flood is rejected before
+	// it can consume a legitimate reader's budget, and inside overload so a
+	// throttled request never takes a concurrency slot it is not going to use.
+	mux.HandleFunc("/api/v1/biometrics/enroll", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleEnroll)))))
+	mux.HandleFunc("/api/v1/biometrics/verify", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleVerify)))))
+	mux.HandleFunc("/api/v1/doors/scan", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleDoorScan)))))
 	mux.HandleFunc("/api/v1/policies/reset-apb", overload(cors(authConfig.RequireAuth(handler.HandleResetAPB))))
 
 	// Public Health and Status endpoints

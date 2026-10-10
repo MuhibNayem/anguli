@@ -139,11 +139,17 @@ jobs:
 
       # A short fuzz run on each target. This is a smoke test that the targets
       # execute and the corpus loads, not a substitute for a long soak run.
+      #
+      # -short is required: the chaos suite's coverage gate lives in TestMain and
+      # deliberately fails when the run is isolated, because a partial run is
+      # exactly what the gate exists to catch. A fuzz target is by definition a
+      # partial run, so it opts out. Coverage is enforced in the chaos job,
+      # which runs the suite whole.
       - name: Fuzz targets smoke run
         run: |
           for target in FuzzCylinderDeserialise FuzzVaultDecrypt FuzzTemplatePipeline FuzzAPBStateMachine; do
             echo "::group::$target"
-            go test ./test/chaos/ -run "XXX" -fuzz "^${target}$" -fuzztime 30s
+            go test ./test/chaos/ -short -run "XXX" -fuzz "^${target}$" -fuzztime 30s
             echo "::endgroup::"
           done
 

@@ -156,24 +156,30 @@ the core count; it does not change the order.
 
 Measured on the development machine, warm cache, 32 minutiae per finger:
 
-| Enrolled fingers | Per walk-up |
-|---:|---:|
-| 50 | 83 ms |
-| 100 | 165 ms |
-| 200 | 319 ms |
-| 400 | 628 ms |
-| 800 | 1.24 s |
-| 1600 | 2.47 s |
+| Enrolled fingers | Per walk-up | Before the matcher fix |
+|---:|---:|---:|
+| 100 | 20 ms | 165 ms |
+| 200 | 38 ms | 319 ms |
+| 400 | 71 ms | 628 ms |
+| 800 | 144 ms | 1.24 s |
+| 1600 | 280 ms | 2.47 s |
+| 3200 | 576 ms | — |
 
-A 4x larger gallery costs 4.25x more — the growth is linear and independent of
-core count. **1:1 verification and 1:1 enrollment are unaffected and remain
-production-ready; 1:N walk-up identification is suitable for small deployments,
-not a Fortune 500 campus.** The 200 ms turnstile SLA is met at roughly 100
-enrolled fingers on this hardware.
+`Cylinder.SimilarityWithShift` profiled at **85% of search CPU** walking all
+1536 cylinder bits one at a time. Rewriting it to work a spatial cell at a time
+using popcount and the inclusion-exclusion identity — with the output proven
+bit-identical to the original against randomised cylinders — made it **5.1x
+faster** and took 1:N from a ~100-finger to a **~1100-finger** gallery inside
+the 200 ms turnstile SLA.
 
-Reaching campus scale needs a change to the matcher, not more caching: a single
-global MCC bitstring compared by Hamming distance is O(words) per pair instead
-of O(cylinders²), at the cost of some rotation tolerance. That is not
+The growth is still linear, and that is the remaining problem. Constant-factor
+work divides the cost; it does not change the order. **1:1 verification and
+enrollment are unaffected and remain production-ready; 1:N walk-up
+identification is now viable for a small site, not a Fortune 500 campus.**
+
+Further scale needs a change to the algorithm, not more constant factors: a
+single global MCC bitstring compared by Hamming distance is O(words) per pair
+instead of O(cylinders²), at some cost in rotation tolerance. That is not
 implemented. `TestSearchScalingIsReported` records the current growth rate so
 the day it changes, this section gets revisited.
 

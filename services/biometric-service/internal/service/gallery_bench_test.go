@@ -73,29 +73,30 @@ func BenchmarkIdentifyGalleryCold(b *testing.B) {
 // MEASURED, do not raise this number without re-measuring. On the development
 // machine, warm gallery, 32 minutiae per finger:
 //
-//	N=  50    83 ms     within a 200 ms budget
-//	N= 100   165 ms     within a 200 ms budget
-//	N= 200   319 ms     over
-//	N= 400   628 ms     over
-//	N= 800  1.241 s     over
-//	N=1600  2.470 s     over
+//	N= 100    20 ms     within a 200 ms budget
+//	N= 200    38 ms     within a 200 ms budget
+//	N= 400    71 ms     within a 200 ms budget
+//	N= 800   144 ms     within a 200 ms budget
+//	N=1600   280 ms     over
+//	N=3200   576 ms     over
 //
-// That is linear, and it is the whole point of this comment. The gallery
-// removed the per-scan database read and AES-GCM decryption, and the worker
-// pool removed the single-goroutine constraint, but the matcher itself still
-// compares every probe cylinder against every gallery cylinder for each
-// candidate - roughly a thousand pair comparisons per candidate, times the
-// whole gallery. Parallelism divides that by the core count; it does not change
-// the order. So 1:N search remains O(enrolled fingers) no matter how many cores
-// it gets, and a 200 ms turnstile SLA is met at roughly 100 enrolments here.
+// The gallery removed the per-scan database read and AES-GCM decryption, and
+// the worker pool removed the single-goroutine constraint. Optimising
+// Cylinder.SimilarityWithShift - which profiled at 85% of search CPU walking
+// all 1536 bits one at a time - bought a further 8x, taking the supported
+// gallery from roughly 100 fingers to roughly 1100 at a 200 ms SLA.
 //
-// This is a single-host laptop measurement with synthetic minutiae and should
-// be repeated on the deployment target, but the SHAPE - linear, and
-// core-count independent - will not change. Reaching corporate-campus scale
-// 1:N needs a change to the matcher: a single global MCC bitstring compared by
-// Hamming distance is O(words) per pair instead of O(cylinders squared). That
-// is not implemented here, and nothing in this file should be read as claiming
-// the system is 1:N-ready at enterprise enrolment counts.
+// The growth is still linear, and that is the point of this comment. Parallelism
+// and constant-factor work divide the cost; they do not change the order. So 1:N
+// search remains O(enrolled fingers) no matter how many cores it gets.
+//
+// A single-host laptop measurement with synthetic minutiae, to be repeated on
+// the deployment target, but the SHAPE - linear and core-count independent -
+// will not change. Reaching genuine campus scale needs a change to the
+// algorithm: a single global MCC bitstring compared by Hamming distance is
+// O(words) per pair instead of O(cylinders squared). That is not implemented
+// here, and nothing in this file should be read as claiming the system is 1:N
+// ready at enterprise enrolment counts.
 //
 // The test therefore asserts what is actually true rather than a number that
 // would fail: it guards against the caching regressing, and it records the
@@ -109,8 +110,8 @@ func TestSearchLatencyStaysWithinTurnstileBudget(t *testing.T) {
 	v := testVault(t)
 
 	// Sized to the measured ceiling, not to an aspiration. See the table above.
-	const enrolled = 100
-	const budget = 400 * time.Millisecond
+	const enrolled = 800
+	const budget = 400 * time.Millisecond * raceLatencyFactor
 
 	for i := 0; i < enrolled; i++ {
 		addEnrolled(t, repo, v, empName(i), 1, synthPoints(32, i))
@@ -137,6 +138,9 @@ func TestSearchLatencyStaysWithinTurnstileBudget(t *testing.T) {
 	per := time.Since(start) / runs
 
 	t.Logf("1:N search over %d enrolments: %v per walk-up (budget %v)", enrolled, per, budget)
+	if raceLatencyFactor > 1 {
+		t.Logf("race detector enabled: budget scaled %dx to account for instrumentation overhead", raceLatencyFactor)
+	}
 	if per > budget {
 		t.Fatalf("1:N search took %v over %d enrolments, over the %v guard. "+
 			"Exceeding it means scans are slower than the turnstile can absorb. "+

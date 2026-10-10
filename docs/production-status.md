@@ -51,34 +51,40 @@ should not be cited as such.
 These are stated plainly because a deployment decision made against an
 optimistic reading is how people get locked out of buildings.
 
-### 1:N identification does not scale past roughly 100 enrolled fingers
+### 1:N identification is still linear in enrolled fingers
 
-Walk-up 1:N search is **O(number of enrolled fingers)**. A cached pre-decrypted
-gallery and a worker pool removed the per-scan database read and AES-GCM
-decryption, but CPU profiling puts **85% of search time in
-`Cylinder.SimilarityWithShift`**, which runs once per probe/gallery cylinder
-pair — about a thousand pairs per candidate, times the whole gallery. A worker
-pool divides that by the core count and does not change the order.
+Walk-up 1:N search is **O(number of enrolled fingers)**. That was made ~11x
+cheaper but not sub-linear.
+
+What was done: a cached pre-decrypted gallery removed the per-scan database read
+and AES-GCM decryption, a worker pool removed the single-goroutine constraint,
+and `Cylinder.SimilarityWithShift` — which profiled at **85% of search CPU**,
+walking all 1536 cylinder bits one at a time — was rewritten to work one spatial
+cell at a time using popcount and the inclusion-exclusion identity. Its output
+is proven **bit-identical** to the original against randomised cylinders, and it
+is 5.1x faster.
 
 Measured, warm cache, 32 minutiae per finger:
 
-| Enrolled fingers | Per walk-up |
-|---:|---:|
-| 50 | 83 ms |
-| 100 | 165 ms |
-| 200 | 319 ms |
-| 400 | 628 ms |
-| 800 | 1.24 s |
-| 1600 | 2.47 s |
+| Enrolled fingers | Per walk-up | Before |
+|---:|---:|---:|
+| 100 | 20 ms | 165 ms |
+| 200 | 38 ms | 319 ms |
+| 400 | 71 ms | 628 ms |
+| 800 | 144 ms | 1.24 s |
+| 1600 | 280 ms | 2.47 s |
+| 3200 | 576 ms | — |
 
-A 4x larger gallery costs 4.25x more. **The 200 ms turnstile SLA is met at
-roughly 100 enrolments on development hardware.** 1:1 is unaffected.
+**The 200 ms turnstile SLA is now met at roughly 1100 enrolled fingers** on
+development hardware, up from about 100. 1:1 is unaffected.
 
-Closing this requires a change to the matcher — a single global MCC bitstring
-compared by Hamming distance is O(words) per pair rather than O(cylinders²),
-at some cost in rotation tolerance. Not implemented, and not implementable
-responsibly without real fingerprint captures to tune and validate against;
-the synthetic minutiae available in-tree are mutually indistinguishable and
+What is still missing: the growth is linear, and constant-factor work divides
+the cost without changing the order. A worker pool cannot fix that, and neither
+can more caching. Genuine campus scale needs a change to the algorithm — a single
+global MCC bitstring compared by Hamming distance is O(words) per pair rather
+than O(cylinders²), at some cost in rotation tolerance. Not implemented, and
+not implementable responsibly without real fingerprint captures to validate
+against; the synthetic minutiae in-tree are mutually indistinguishable and
 cannot serve that purpose.
 
 ### No presentation attack detection

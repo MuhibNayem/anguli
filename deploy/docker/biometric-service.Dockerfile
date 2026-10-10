@@ -1,5 +1,5 @@
-# Multi-stage production build using golang:1.25.3-alpine
-FROM golang:1.25.3-alpine AS builder
+# Multi-stage production build using golang:1.26-alpine
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 

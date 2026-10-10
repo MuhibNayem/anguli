@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -94,20 +95,33 @@ func TestZZLedgerSanity(t *testing.T) {
 //	go test ./test/chaos/ -run XXX # isolated run, gate intentionally fails
 func TestMain(m *testing.M) {
 	short := false
-	for _, a := range os.Args {
-		if a == "-test.short" || a == "-short" {
-			short = true
-		}
-	}
+	fuzzing := false
 	isolated := false
 	for _, a := range os.Args {
-		if a == "-test.run" || a == "-run" {
+		switch {
+		// Match by prefix, not equality. `go test -short` hands the binary
+		// "-test.short=true", never a bare "-test.short", so an exact
+		// comparison silently never matched and -short did not skip anything
+		// despite the README documenting it.
+		case strings.HasPrefix(a, "-test.short"), a == "-short":
+			short = true
+		case strings.HasPrefix(a, "-test.run="), a == "-test.run", a == "-run":
 			isolated = true
+		case strings.HasPrefix(a, "-test.fuzz="), strings.HasPrefix(a, "-fuzz="):
+			// Under -fuzz, go test re-executes the binary for each fuzzing
+			// worker with its own argument set, and -test.short is not carried
+			// across. Relying on it alone meant every fuzz run tripped the
+			// coverage gate and CI went red on a suite that had passed.
+			fuzzing = true
 		}
 	}
 
 	code := m.Run()
-	if short {
+
+	// A fuzzing run is isolated by construction - it exercises one target, not
+	// the suite - so the coverage contract does not apply to it. Coverage is
+	// enforced by the full run.
+	if short || fuzzing {
 		os.Exit(code)
 	}
 

@@ -18,7 +18,7 @@ services:
       - "50051:50051"
     environment:
       - PORT=50051
-      - MASTER_KEY=${MASTER_KEY:?Error: MASTER_KEY environment variable is required and must be a 64-char hex string}
+      - MASTER_KEY=${MASTER_KEY:?MASTER_KEY must be set to a 64-char hex string}
       - STORAGE_DRIVER=${STORAGE_DRIVER:-sqlite}
       - STORAGE_DSN=${STORAGE_DSN:-}
       - STORAGE_DATA_DIR=/data
@@ -87,7 +87,7 @@ services:
       - BIOMETRIC_ADDR=biometric-service:50051
       - POLICY_ADDR=access-policy-service:50052
       - EDGE_ADDR=edge-gateway-service:50053
-      - API_GATEWAY_KEY=${API_GATEWAY_KEY:?Error: API_GATEWAY_KEY environment variable is required}
+      - API_GATEWAY_KEY=${API_GATEWAY_KEY:?API_GATEWAY_KEY must be set}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       # Overload protection: bound concurrency so excess load is shed with a
       # 503 instead of queueing without limit.

@@ -16,9 +16,10 @@ services, SIA OSDP v2.2 hardware integration, and a 3,000-case chaos suite.
 |---|---|
 | Biometric pipeline | `pkg/biometrics/` — image, minutiae, MCC, quality, crypto |
 | Interop | `pkg/biometrics/iso19794/` — ISO/IEC 19794-4 image records; `pkg/biometrics/iso19794b/` — ISO/IEC 19794-2 minutiae records |
-| Hardware | `pkg/hardware/` — OSDP v2.2 framing, turnstile driver |
+| Hardware | `pkg/hardware/` — OSDP v2.2 framing, turnstile driver, `fprintd/` attestation driver |
 | Security | `pkg/security/` — TLS, rate limiting; `pkg/resilience/` — admission control, circuit breakers |
 | Storage | `pkg/store/` — SQLite (default) and PostgreSQL drivers behind one interface |
+| Evaluation | `pkg/biometrics/dataset/` + `cmd/anguli-eval` — matcher accuracy on real fingerprint records |
 | Services | `services/` — biometric, access-policy, edge-gateway, api-gateway |
 | Chaos suite | `test/chaos/` — 2,728 cases across 42 dimensions behind a hard gate |
 
@@ -102,6 +103,59 @@ exists to catch — fuzz runs pass `-short` to opt out. See
 - **chaos** — both chaos suites with their gates, plus a race-detector pass
 - **fuzz** — a 30 s smoke run per fuzz target
 - **build** — matrix build of all four service images
+
+## Measuring the matcher on real data
+
+Every accuracy number this project has produced came from synthetic images.
+That proves a pipeline does not crash and a codec round-trips; it says nothing
+about whether the matcher recognises a finger it has seen once.
+
+`cmd/anguli-eval` runs the platform's actual pipeline — normalise, binarise,
+thin, extract minutiae, build MCC templates, match — over records on disk and
+reports the standard open-set measures.
+
+```bash
+go run ./cmd/anguli-eval -dir ./mydataset -roc
+```
+
+`mydataset` holds ISO/IEC 19794-4 image records and/or 19794-2 minutiae
+records. Subject and finger come from `manifest.tsv` if present:
+
+```
+# file<TAB>subject<TAB>finger
+s01_left-index_01.iso	s01	left-index
+```
+
+or from a `<subject>_<finger>_<n>` file name otherwise. A **genuine** trial is
+two impressions of the same finger; an **impostor** trial is two different
+people. Trials are seeded, so the same dataset and seed always produce the same
+comparison set and a score change between runs is a real change.
+
+Two things to know before trusting its output:
+
+- The MCC score is **not** normalised to 0..1. Production compares it against
+  60, and the flag defaults to that. Feeding it a 0..1 threshold accepts nearly
+  everything and reports a false accept rate of 1.0 while looking healthy.
+- Trials that fail to score are **excluded** and reported separately, because
+  a dataset with many unreadable prints biases the measured rates optimistically.
+
+It does not download datasets. FVC and NIST SD4 carry their own licences.
+
+## Hardware note: laptop fingerprint sensors
+
+macOS Touch ID never releases the fingerprint image from the Secure Enclave, so
+no application can read pixels — nothing to feed the pipeline. Most Linux
+laptop sensors are **match-on-sensor** (for example Synaptics `06cb:00f9`): the
+chip has its own MCU, matches in its own firmware, and returns only a verdict.
+That is why `pkg/hardware/fprintd` is an **attestation** driver, not a capture
+one — it answers "did the enrolled owner just touch the sensor?" and cannot
+produce an image. It talks D-Bus to `fprintd` in pure Go, so Alpine and CGO-off
+builds are unaffected.
+
+`fprintd` is a per-session service, so it suits a kiosk or per-terminal
+deployment. It does not suit a headless door-controller daemon running as a
+system service. For real door hardware use `pkg/hardware/osdp`, which returns
+pixels from a reader that exposes them.
 
 ## Known limitations
 

@@ -37,6 +37,7 @@ type BiometricUseCase interface {
 	Verify(ctx context.Context, empID string, position int32, probePix []byte, width, height uint32) (*mcc.MatchVerificationResult, uint32, error)
 	Identify(ctx context.Context, probePix []byte, width, height uint32, topK uint32) ([]CandidateResult, error)
 	GetTemplate(ctx context.Context, empID string, position int32) (*domain.EnrolledTemplate, *domain.DecryptedTemplatePayload, error)
+	Revoke(ctx context.Context, empID string, position int32, reason string) (bool, error)
 }
 
 // CandidateResult represents a ranked match in 1:N search.
@@ -317,4 +318,60 @@ func (s *biometricService) GetTemplate(ctx context.Context, empID string, positi
 	}
 
 	return enrolled, &payload, nil
+}
+
+// Revoke removes an employee's fingerprint from every matching path.
+//
+// This is the offboarding control, and its absence is a physical-access defect
+// rather than a housekeeping one: without it a terminated employee keeps their
+// template centrally AND at every edge node, and their finger keeps opening
+// doors indefinitely. Nothing else in the system substitutes for it - the
+// roster sync only ever writes IsActive: true, and there is no route that can
+// write false.
+//
+// Three things have to happen together for this to actually revoke:
+//
+//   - the row is flagged, so ListAll stops returning it to the 1:N gallery and
+//     GetByEmployeeAndPosition stops serving it to 1:1 verification;
+//   - the gallery cache is invalidated, because it is a 30-second snapshot and
+//     would otherwise keep matching the revoked template until it expired;
+//   - the caller is told whether anything was actually revoked, so an
+//     offboarding job can distinguish "done" from "there was nothing to do".
+//
+// Reports false without error when there was no live template, which makes the
+// call idempotent and safe to retry.
+func (s *biometricService) Revoke(
+	ctx context.Context, empID string, position int32, reason string,
+) (bool, error) {
+	if empID == "" {
+		return false, errors.New("revoke requires an employee id")
+	}
+	revoked, err := s.repo.Revoke(ctx, empID, position, reason, time.Now().Unix())
+	if err != nil {
+		s.logger.ErrorContext(ctx, "template revocation failed",
+			slog.String("employee_id", empID),
+			slog.Int("position", int(position)),
+			slog.String("error", err.Error()),
+		)
+		return false, err
+	}
+
+	// Invalidate unconditionally, not only when something was revoked. A retry
+	// that finds nothing to revoke still has to clear any cached copy, or a
+	// previously-revoked template could linger in this replica's gallery.
+	s.gallery.invalidate()
+
+	if revoked {
+		s.logger.InfoContext(ctx, "fingerprint template revoked",
+			slog.String("employee_id", empID),
+			slog.Int("position", int(position)),
+			slog.String("reason", reason),
+		)
+	} else {
+		s.logger.InfoContext(ctx, "no live template to revoke",
+			slog.String("employee_id", empID),
+			slog.Int("position", int(position)),
+		)
+	}
+	return revoked, nil
 }

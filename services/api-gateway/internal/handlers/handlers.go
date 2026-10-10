@@ -477,3 +477,95 @@ func generateSyntheticPrint(w, h int, seed string, noiseFactor int) []byte {
 	}
 	return pix
 }
+
+// RevokeRequest identifies a single enrolled finger to revoke.
+type RevokeRequest struct {
+	EmployeeID string `json:"employee_id"`
+	Position   int32  `json:"position"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// HandleRevokeTemplate is the offboarding control.
+//
+// Until this route existed, the platform could add people but never remove
+// them: the repository had a revoked flag and an audit table, no service
+// operation could set them, and no route could reach the service. A terminated
+// employee's fingerprint therefore kept opening doors - centrally and at every
+// edge node, which is a cache the platform owns and cannot remotely recall on
+// demand.
+//
+// The edge is told explicitly, because revoking centrally is not sufficient on
+// its own: an edge that has never been told will keep serving a template it
+// cached at enrollment. A failure to propagate is reported rather than
+// swallowed, so the operator learns the offboarding is incomplete instead of
+// assuming it worked.
+func (h *GatewayHandler) HandleRevokeTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	var req RevokeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
+		return
+	}
+	if req.EmployeeID == "" {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "employee_id is required"})
+		return
+	}
+	if strings.TrimSpace(req.Reason) == "" {
+		// An unlabelled revocation is still recorded as UNSPECIFIED rather
+		// than refused. Refusing here would leave the employee enrolled, which
+		// is a far worse outcome than a vague audit reason.
+		req.Reason = "UNSPECIFIED"
+	}
+
+	resp, err := call(r.Context(), h, clients.DownstreamBiometrics,
+		func(ctx context.Context) (*biometricsv1.RevokeFingerprintResponse, error) {
+			return h.clients.BiometricsClient.RevokeFingerprint(ctx, &biometricsv1.RevokeFingerprintRequest{
+				EmployeeId: req.EmployeeID,
+				Position:   biometricsv1.FingerPosition(req.Position),
+				Reason:     req.Reason,
+			})
+		})
+	if err != nil {
+		h.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Tell the edge to drop them. This runs after the central revoke succeeds,
+	// so a failure here leaves the person denied centrally but still cached at
+	// the edge - reported, not hidden.
+	edgeSynced := false
+	syncResp, syncErr := call(r.Context(), h, clients.DownstreamEdge,
+		func(ctx context.Context) (*edgegatewayv1.SyncFacilityRosterResponse, error) {
+			return h.clients.EdgeGatewayClient.SyncFacilityRoster(ctx, &edgegatewayv1.SyncFacilityRosterRequest{
+				FacilityId: "facility-primary",
+				Items: []*edgegatewayv1.SyncEmployeeItem{{
+					EmployeeId: req.EmployeeID,
+					Position:   biometricsv1.FingerPosition(req.Position),
+					IsActive:   false,
+				}},
+			})
+		})
+	if syncErr != nil {
+		h.logger.ErrorContext(r.Context(), "edge roster purge failed during revocation; "+
+			"the edge may still match this employee",
+			slog.String("employee_id", req.EmployeeID),
+			slog.String("error", syncErr.Error()),
+		)
+	} else if syncResp != nil && syncResp.Success {
+		edgeSynced = true
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"employee_id":  req.EmployeeID,
+		"revoked":      resp.Revoked,
+		"reason":       req.Reason,
+		"edge_synced":  edgeSynced,
+		"already_gone": !resp.Revoked,
+	})
+}

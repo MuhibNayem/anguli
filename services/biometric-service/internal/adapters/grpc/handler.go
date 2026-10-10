@@ -167,3 +167,26 @@ func (s *Server) GetTemplate(ctx context.Context, req *biometricsv1.GetTemplateR
 		},
 	}, nil
 }
+
+// RevokeFingerprint flags an enrolled template out of every matching path.
+//
+// "Nothing to revoke" is reported as revoked=false rather than as an error.
+// An offboarding job that runs twice, or races a re-enrollment, must be able to
+// proceed without treating the second run as a failure - and treating it as one
+// is exactly how people end up leaving someone enrolled after a failed job.
+func (s *Server) RevokeFingerprint(
+	ctx context.Context, req *biometricsv1.RevokeFingerprintRequest,
+) (*biometricsv1.RevokeFingerprintResponse, error) {
+	if req.GetEmployeeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "employee_id is required")
+	}
+
+	revoked, err := s.svc.Revoke(ctx, req.GetEmployeeId(), int32(req.GetPosition()), req.GetReason())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "revoke template: %v", err)
+	}
+	return &biometricsv1.RevokeFingerprintResponse{
+		Revoked:    revoked,
+		EmployeeId: req.GetEmployeeId(),
+	}, nil
+}

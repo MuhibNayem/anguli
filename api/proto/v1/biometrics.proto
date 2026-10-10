@@ -17,6 +17,20 @@ service BiometricsService {
 
   // GetTemplate retrieves an enrolled template record for local edge caching.
   rpc GetTemplate(GetTemplateRequest) returns (GetTemplateResponse);
+
+  // RevokeFingerprint removes an enrolled template from every matching path.
+  //
+  // This is the offboarding control. Without it a terminated employee keeps a
+  // template centrally and at every edge node, and their finger continues to
+  // open doors. Revocation is not deletion: the encrypted payload is archived
+  // for audit and the row is flagged, so the template can never be matched
+  // again while "who was enrolled here, and when did that stop being true"
+  // stays answerable.
+  //
+  // The operation is idempotent. Revoking an employee with no live template
+  // succeeds and reports revoked=false, so an offboarding job can be retried
+  // without special-casing a partial failure.
+  rpc RevokeFingerprint(RevokeFingerprintRequest) returns (RevokeFingerprintResponse);
 }
 
 enum FingerPosition {
@@ -124,4 +138,21 @@ message TemplateRecord {
 message GetTemplateResponse {
   bool found = 1;
   TemplateRecord template = 2;
+}
+
+message RevokeFingerprintRequest {
+  string employee_id = 1;
+  FingerPosition position = 2;
+  // reason is recorded in the audit trail. An empty value is stored as
+  // UNSPECIFIED rather than rejected: refusing to record an offboarding
+  // because someone omitted a label would leave the employee enrolled.
+  string reason = 3;
+}
+
+message RevokeFingerprintResponse {
+  // revoked is true when a live template was actually flagged. False means
+  // there was nothing to revoke, which is not an error.
+  bool revoked = 1;
+  // employee_id echoes the request so a bulk job can correlate results.
+  string employee_id = 2;
 }

@@ -151,6 +151,33 @@ It is off by default because a single-host `docker compose up` has no
 certificate authority. That is a development convenience, not a production
 posture: in any real deployment this should be on.
 
+### Offboarding: revoking a fingerprint
+
+```sh
+curl -X POST http://localhost:8080/api/v1/biometrics/revoke \
+  -H "X-API-Key: $API_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"employee_id":"EMP-1042","position":1,"reason":"OFFBOARDED"}'
+```
+
+```json
+{"employee_id":"EMP-1042","revoked":true,"reason":"OFFBOARDED","edge_synced":true,"already_gone":false}
+```
+
+`DELETE` is accepted as well. **Check `edge_synced`** — it is `false` when the
+edge could not be reached, and that is a partial offboarding: the employee is
+denied centrally but a cached edge copy may still match. Retry until it is true.
+
+Revocation is not deletion. The template row is flagged out of every read path,
+its encrypted payload is archived into `revocation_records` with the reason, and
+the 1:N gallery cache is invalidated immediately — waiting out its 30-second TTL
+would leave a revoked template matchable for another half minute, which is
+exactly the window someone already on site would use.
+
+The operation is **idempotent**. Revoking an employee with no live template
+returns `"revoked": false` with HTTP 200 and `"already_gone": true`, so a
+bulk HR offboarding job can be retried without special-casing partial failures.
+
 ### Rate limiting the biometric endpoints
 
 `/api/v1/biometrics/enroll`, `/api/v1/biometrics/verify` and `/api/v1/doors/scan`

@@ -210,6 +210,7 @@ func main() {
 	mux.HandleFunc("/api/v1/biometrics/enroll", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleEnroll)))))
 	mux.HandleFunc("/api/v1/biometrics/verify", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleVerify)))))
 	mux.HandleFunc("/api/v1/doors/scan", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleDoorScan)))))
+	mux.HandleFunc("/api/v1/biometrics/revoke", overload(cors(authConfig.RequireAuth(rateLimit(handler.HandleRevokeTemplate)))))
 	mux.HandleFunc("/api/v1/policies/reset-apb", overload(cors(authConfig.RequireAuth(handler.HandleResetAPB))))
 
 	// Public Health and Status endpoints

@@ -23,6 +23,7 @@ const (
 	BiometricsService_VerifyFingerprint_FullMethodName   = "/biometrics.v1.BiometricsService/VerifyFingerprint"
 	BiometricsService_IdentifyFingerprint_FullMethodName = "/biometrics.v1.BiometricsService/IdentifyFingerprint"
 	BiometricsService_GetTemplate_FullMethodName         = "/biometrics.v1.BiometricsService/GetTemplate"
+	BiometricsService_RevokeFingerprint_FullMethodName   = "/biometrics.v1.BiometricsService/RevokeFingerprint"
 )
 
 // BiometricsServiceClient is the client API for BiometricsService service.
@@ -39,6 +40,19 @@ type BiometricsServiceClient interface {
 	IdentifyFingerprint(ctx context.Context, in *IdentifyFingerprintRequest, opts ...grpc.CallOption) (*IdentifyFingerprintResponse, error)
 	// GetTemplate retrieves an enrolled template record for local edge caching.
 	GetTemplate(ctx context.Context, in *GetTemplateRequest, opts ...grpc.CallOption) (*GetTemplateResponse, error)
+	// RevokeFingerprint removes an enrolled template from every matching path.
+	//
+	// This is the offboarding control. Without it a terminated employee keeps a
+	// template centrally and at every edge node, and their finger continues to
+	// open doors. Revocation is not deletion: the encrypted payload is archived
+	// for audit and the row is flagged, so the template can never be matched
+	// again while "who was enrolled here, and when did that stop being true"
+	// stays answerable.
+	//
+	// The operation is idempotent. Revoking an employee with no live template
+	// succeeds and reports revoked=false, so an offboarding job can be retried
+	// without special-casing a partial failure.
+	RevokeFingerprint(ctx context.Context, in *RevokeFingerprintRequest, opts ...grpc.CallOption) (*RevokeFingerprintResponse, error)
 }
 
 type biometricsServiceClient struct {
@@ -89,6 +103,16 @@ func (c *biometricsServiceClient) GetTemplate(ctx context.Context, in *GetTempla
 	return out, nil
 }
 
+func (c *biometricsServiceClient) RevokeFingerprint(ctx context.Context, in *RevokeFingerprintRequest, opts ...grpc.CallOption) (*RevokeFingerprintResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeFingerprintResponse)
+	err := c.cc.Invoke(ctx, BiometricsService_RevokeFingerprint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BiometricsServiceServer is the server API for BiometricsService service.
 // All implementations must embed UnimplementedBiometricsServiceServer
 // for forward compatibility.
@@ -103,6 +127,19 @@ type BiometricsServiceServer interface {
 	IdentifyFingerprint(context.Context, *IdentifyFingerprintRequest) (*IdentifyFingerprintResponse, error)
 	// GetTemplate retrieves an enrolled template record for local edge caching.
 	GetTemplate(context.Context, *GetTemplateRequest) (*GetTemplateResponse, error)
+	// RevokeFingerprint removes an enrolled template from every matching path.
+	//
+	// This is the offboarding control. Without it a terminated employee keeps a
+	// template centrally and at every edge node, and their finger continues to
+	// open doors. Revocation is not deletion: the encrypted payload is archived
+	// for audit and the row is flagged, so the template can never be matched
+	// again while "who was enrolled here, and when did that stop being true"
+	// stays answerable.
+	//
+	// The operation is idempotent. Revoking an employee with no live template
+	// succeeds and reports revoked=false, so an offboarding job can be retried
+	// without special-casing a partial failure.
+	RevokeFingerprint(context.Context, *RevokeFingerprintRequest) (*RevokeFingerprintResponse, error)
 	mustEmbedUnimplementedBiometricsServiceServer()
 }
 
@@ -124,6 +161,9 @@ func (UnimplementedBiometricsServiceServer) IdentifyFingerprint(context.Context,
 }
 func (UnimplementedBiometricsServiceServer) GetTemplate(context.Context, *GetTemplateRequest) (*GetTemplateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetTemplate not implemented")
+}
+func (UnimplementedBiometricsServiceServer) RevokeFingerprint(context.Context, *RevokeFingerprintRequest) (*RevokeFingerprintResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RevokeFingerprint not implemented")
 }
 func (UnimplementedBiometricsServiceServer) mustEmbedUnimplementedBiometricsServiceServer() {}
 func (UnimplementedBiometricsServiceServer) testEmbeddedByValue()                           {}
@@ -218,6 +258,24 @@ func _BiometricsService_GetTemplate_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BiometricsService_RevokeFingerprint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeFingerprintRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BiometricsServiceServer).RevokeFingerprint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BiometricsService_RevokeFingerprint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BiometricsServiceServer).RevokeFingerprint(ctx, req.(*RevokeFingerprintRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // BiometricsService_ServiceDesc is the grpc.ServiceDesc for BiometricsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -240,6 +298,10 @@ var BiometricsService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTemplate",
 			Handler:    _BiometricsService_GetTemplate_Handler,
+		},
+		{
+			MethodName: "RevokeFingerprint",
+			Handler:    _BiometricsService_RevokeFingerprint_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

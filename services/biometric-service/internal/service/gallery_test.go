@@ -21,9 +21,10 @@ import (
 // the whole point of the gallery: the expensive scan must happen once, not
 // once per walk-up.
 type countingRepo struct {
-	mu    sync.Mutex
-	items []*domain.EnrolledTemplate
-	reads atomic.Int64
+	mu      sync.Mutex
+	items   []*domain.EnrolledTemplate
+	revoked []*domain.RevocationRecord
+	reads   atomic.Int64
 }
 
 func (r *countingRepo) Save(ctx context.Context, t *domain.EnrolledTemplate) error {
@@ -43,19 +44,63 @@ func (r *countingRepo) GetByEmployeeAndPosition(_ context.Context, empID string,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, it := range r.items {
-		if it.EmployeeID == empID && it.Position == pos {
+		if it.EmployeeID == empID && it.Position == pos && !it.Revoked {
 			return it, nil
 		}
 	}
 	return nil, fmt.Errorf("not found")
 }
 
+// ListAll excludes revoked templates, matching both real adapters. If this stub
+// ignored the flag, a test asserting that a revoked employee stops matching
+// would pass for the wrong reason here and fail against real storage.
 func (r *countingRepo) ListAll(context.Context) ([]*domain.EnrolledTemplate, error) {
 	r.reads.Add(1)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]*domain.EnrolledTemplate, len(r.items))
-	copy(out, r.items)
+	out := make([]*domain.EnrolledTemplate, 0, len(r.items))
+	for _, it := range r.items {
+		if !it.Revoked {
+			out = append(out, it)
+		}
+	}
+	return out, nil
+}
+
+func (r *countingRepo) Revoke(
+	_ context.Context, empID string, pos int32, reason string, atUnix int64,
+) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, it := range r.items {
+		if it.EmployeeID == empID && it.Position == pos && !it.Revoked {
+			cp := *it
+			cp.Revoked = true
+			r.items[i] = &cp
+			r.revoked = append(r.revoked, &domain.RevocationRecord{
+				TemplateID:    it.TemplateID,
+				EmployeeID:    it.EmployeeID,
+				Position:      it.Position,
+				RevokedAtUnix: atUnix,
+				Reason:        reason,
+				PriorPayload:  it.EncryptedPayload,
+			})
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// revocations mirrors RevocationHistory for assertions about audit provenance.
+func (r *countingRepo) revocations(empID string) ([]*domain.RevocationRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*domain.RevocationRecord, 0, len(r.revoked))
+	for _, rec := range r.revoked {
+		if rec.EmployeeID == empID {
+			out = append(out, rec)
+		}
+	}
 	return out, nil
 }
 

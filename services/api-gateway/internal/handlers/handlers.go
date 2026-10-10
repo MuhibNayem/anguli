@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	accesscontrolv1 "finger-scanner/pkg/api/v1/accesscontrol"
@@ -244,12 +245,17 @@ func (h *GatewayHandler) HandleDoorScan(w http.ResponseWriter, r *http.Request) 
 		req.Direction = 1 // Entry
 	}
 
-	// C5: Prevent untrusted 1:1 identity claims
+	// C5: Prevent untrusted 1:1 identity claims.
+	//
+	// Header presence is checked after trimming: a header sent as
+	// "X-Reader-Token:   " is not a credential. Comparing against "" directly
+	// let a whitespace-only value satisfy this gate, which is the entire
+	// control this branch exists to enforce.
 	if req.EmployeeID != "" {
-		readerToken := r.Header.Get("X-Reader-Token")
-		readerID := r.Header.Get("X-Reader-ID")
-		apiKey := r.Header.Get("X-API-Key")
-		if readerToken == "" && readerID == "" && apiKey == "" && req.CredentialCardID == "" {
+		readerToken := strings.TrimSpace(r.Header.Get("X-Reader-Token"))
+		readerID := strings.TrimSpace(r.Header.Get("X-Reader-ID"))
+		apiKey := strings.TrimSpace(r.Header.Get("X-API-Key"))
+		if readerToken == "" && readerID == "" && apiKey == "" && strings.TrimSpace(req.CredentialCardID) == "" {
 			h.writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": "untrusted identity claim: 1:1 verification requires authenticated reader channel (X-Reader-Token/X-Reader-ID) or physical badge credential",
 			})
